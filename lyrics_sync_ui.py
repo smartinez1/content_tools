@@ -40,6 +40,7 @@ from lyrics_sync import (
     parse_lyrics,
     render,
 )
+from video_fx import AestheticConfig, process_video_lofi
 
 app = FastAPI(title="content_tools - Lyrics & Subtitles Studio")
 app.add_middleware(
@@ -239,6 +240,12 @@ def stream_rendered_video(song_name: str, request: Request):
     return range_streaming_response(request, clip)
 
 
+@app.get("/api/aesthetics")
+def get_aesthetics():
+    """Return default aesthetic toggles and config."""
+    return AestheticConfig().to_dict()
+
+
 @app.get("/api/presets")
 def get_presets():
     if PRESETS_FILE.exists():
@@ -248,16 +255,45 @@ def get_presets():
             pass
     # Default presets
     default_presets = {
-        "Helvetica Modern (Default)": CaptionStyle(font_name="Helvetica", font_size=48).to_dict(),
-        "Minimal White": CaptionStyle(
+        "Lo-Fi Emo-Trap (Default)": CaptionStyle(
+            font_name="Helvetica",
+            font_size=48,
+            box_width=680,
+            lowercase=True,
+            text_opacity=0.88,
+            opacity_trailing=True,
+            fade_in_ms=180,
+            fade_out_ms=350,
+        ).to_dict(),
+        "Narrow Blocky Column": CaptionStyle(
             font_name="Helvetica",
             font_size=44,
+            box_width=480,
+            lowercase=True,
+            text_opacity=0.85,
+            opacity_trailing=True,
+            margin_v=780,
+        ).to_dict(),
+        "Helvetica Modern Clean": CaptionStyle(
+            font_name="Helvetica",
+            font_size=48,
+            box_width=800,
+            lowercase=False,
+            text_opacity=1.0,
+            opacity_trailing=False,
+        ).to_dict(),
+        "Minimal Ghost Text": CaptionStyle(
+            font_name="Helvetica",
+            font_size=42,
+            box_width=620,
             primary_color="#FFFFFF",
             secondary_color="#B0B0B0",
+            text_opacity=0.75,
             outline=2.0,
             shadow=1.0,
-            fade_in_ms=180,
-            fade_out_ms=220,
+            fade_in_ms=220,
+            fade_out_ms=400,
+            lowercase=True,
         ).to_dict(),
         "Bold Impact Pop": CaptionStyle(
             font_name="Impact",
@@ -267,16 +303,7 @@ def get_presets():
             outline=5.0,
             shadow=3.0,
             pop_scale=20.0,
-        ).to_dict(),
-        "Clean Subtitle (No Karaoke)": CaptionStyle(
-            font_name="Helvetica",
-            font_size=42,
-            primary_color="#FFFFFF",
-            secondary_color="#FFFFFF",
-            karaoke=False,
-            outline=2.5,
-            shadow=1.5,
-            margin_v=600,
+            lowercase=False,
         ).to_dict(),
     }
     return default_presets
@@ -379,6 +406,8 @@ def start_align(payload: dict = Body(...)):
 def start_preview(payload: dict = Body(...)):
     song_name = payload.get("song_name")
     style_dict = payload.get("style", {})
+    aesthetics_dict = payload.get("aesthetics", {})
+    apply_lofi = payload.get("apply_lofi", True)
     start_sec = float(payload.get("start_sec", 24.0))
     duration_sec = float(payload.get("duration_sec", 10.0))
 
@@ -397,6 +426,7 @@ def start_preview(payload: dict = Body(...)):
     def run():
         job.status = "running"
         job.message = "Generating subtitle file..."
+        temp_sub_clip = None
         try:
             style = CaptionStyle.from_dict(style_dict)
             aligned = json.loads(timings_path.read_text(encoding="utf-8"))
@@ -409,21 +439,47 @@ def start_preview(payload: dict = Body(...)):
             out_clip = PREVIEWS_DIR / f"{job.id}.mp4"
             ffmpeg = find_ffmpeg()
 
+            if apply_lofi:
+                temp_sub_clip = PREVIEWS_DIR / f"{job.id}_sub.mp4"
+                target_burn = temp_sub_clip
+            else:
+                target_burn = out_clip
+
             def on_progress(k, v):
                 if k == "out_time_us":
                     cur_s = float(v) / 1_000_000
-                    job.progress = min(99.0, max(5.0, (cur_s / duration_sec) * 100))
-                    job.message = f"Encoding preview clip ({job.progress:.0f}%)..."
+                    scale = 30.0 if apply_lofi else 100.0
+                    job.progress = min(scale - 1.0, max(5.0, (cur_s / duration_sec) * scale))
+                    job.message = f"Encoding subtitles ({job.progress:.0f}%)..."
 
             render(
                 video,
                 temp_ass,
-                out_clip,
+                target_burn,
                 ffmpeg,
                 preview=(start_sec, duration_sec),
                 on_progress=on_progress,
                 cancel_check=lambda: job.cancel_requested,
             )
+
+            # Stage 2: Audio-reactive Lo-Fi pipeline if enabled
+            if apply_lofi:
+                job.message = "Applying Lo-Fi Emo-Trap audio reactivity..."
+                job.progress = 30.0
+                cfg = AestheticConfig.from_dict(aesthetics_dict)
+
+                def on_lofi_progress(pct, msg):
+                    job.progress = 30.0 + (pct * 0.70)
+                    job.message = msg
+
+                process_video_lofi(
+                    temp_sub_clip,
+                    out_clip,
+                    audio_source=video,
+                    config=cfg,
+                    on_progress=on_lofi_progress,
+                    cancel_check=lambda: job.cancel_requested,
+                )
 
             job.status = "completed"
             job.progress = 100.0
@@ -433,6 +489,12 @@ def start_preview(payload: dict = Body(...)):
             job.status = "cancelled" if job.cancel_requested else "failed"
             job.error = str(e)
             job.message = f"Error: {e}"
+        finally:
+            if temp_sub_clip and temp_sub_clip.exists():
+                try:
+                    temp_sub_clip.unlink()
+                except Exception:
+                    pass
 
     executor.submit(run)
     return {"job_id": job.id}
@@ -442,6 +504,8 @@ def start_preview(payload: dict = Body(...)):
 def start_render(payload: dict = Body(...)):
     song_name = payload.get("song_name")
     style_dict = payload.get("style", {})
+    aesthetics_dict = payload.get("aesthetics", {})
+    lofi_mode = payload.get("lofi_mode", True)
 
     video = find_closest(VIDEO_DIR, song_name, {".mp4", ".mov"}, exclude=(" - lyrics", "_lyrics"))
     if not video:
@@ -457,7 +521,8 @@ def start_render(payload: dict = Body(...)):
 
     def run():
         job.status = "running"
-        job.message = "Preparing full render..."
+        job.message = "Preparing video export..."
+        temp_clean_render = None
         try:
             style = CaptionStyle.from_dict(style_dict)
             aligned = json.loads(timings_path.read_text(encoding="utf-8"))
@@ -470,24 +535,50 @@ def start_render(payload: dict = Body(...)):
             final_out = VIDEO_DIR / f"{song_name} - lyrics.mp4"
             ffmpeg = find_ffmpeg()
 
+            if lofi_mode:
+                temp_clean_render = VIDEO_DIR / f"{song_name} - lyrics_clean.mp4"
+                target_burn = temp_clean_render
+            else:
+                target_burn = final_out
+
             def on_progress(k, v):
                 if k == "out_time_us":
                     cur_s = float(v) / 1_000_000
-                    job.progress = min(99.0, max(2.0, (cur_s / total_dur) * 100))
-                    job.message = f"Rendering full video ({job.progress:.1f}%)..."
+                    scale = 25.0 if lofi_mode else 100.0
+                    job.progress = min(scale - 1.0, max(2.0, (cur_s / total_dur) * scale))
+                    job.message = f"Rendering subtitles ({job.progress:.1f}%)..."
 
             render(
                 video,
                 final_ass,
-                final_out,
+                target_burn,
                 ffmpeg,
                 on_progress=on_progress,
                 cancel_check=lambda: job.cancel_requested,
             )
 
+            # Stage 2: Full Lo-Fi Audio-Reactive processing pass
+            if lofi_mode:
+                job.message = "Starting Lo-Fi Emo-Trap processing pass..."
+                job.progress = 25.0
+                cfg = AestheticConfig.from_dict(aesthetics_dict)
+
+                def on_lofi_progress(pct, msg):
+                    job.progress = 25.0 + (pct * 0.75)
+                    job.message = msg
+
+                process_video_lofi(
+                    temp_clean_render,
+                    final_out,
+                    audio_source=video,
+                    config=cfg,
+                    on_progress=on_lofi_progress,
+                    cancel_check=lambda: job.cancel_requested,
+                )
+
             job.status = "completed"
             job.progress = 100.0
-            job.message = "Full render completed!"
+            job.message = "Export completed!"
             job.output_url = f"/api/video/rendered/{song_name}"
         except Exception as e:
             job.status = "cancelled" if job.cancel_requested else "failed"

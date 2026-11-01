@@ -62,15 +62,19 @@ class CaptionStyle:
     margin_l: int = 70
     margin_r: int = 70
     margin_v: int = 760                 # Vertical margin (bottom offset)
+    box_width: int | None = None        # Subtitle column width in script pixels (e.g. 700)
     pos_x: float | None = None          # Absolute script-pixel X override
     pos_y: float | None = None          # Absolute script-pixel Y override
-    fade_in_ms: int = 120
-    fade_out_ms: int = 180
+    fade_in_ms: int = 150
+    fade_out_ms: int = 250
     karaoke: bool = True
     karaoke_tag: str = "kf"             # 'kf' (sweep), 'k' (jump), 'ko' (outline)
     blur: float = 0.0
     pop_scale: float = 0.0              # Pop scale percentage (e.g. 15 for 115%)
     letter_spacing: int = 0             # Letter spacing in pixels (\fsp)
+    lowercase: bool = True              # Grotesque emo aesthetic (all lowercase)
+    text_opacity: float = 0.88          # Opacity (0.0 to 1.0; 0.88 = never 100% solid)
+    opacity_trailing: bool = True       # Uneven trailing dissolve
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -308,9 +312,18 @@ def build_ass(
             end = start + 0.5
         events.append({"start": start, "end": end, "line": line})
 
-    pri_col = hex_to_ass_color(st.primary_color)
-    sec_col = hex_to_ass_color(st.secondary_color)
-    out_col = hex_to_ass_color(st.outline_color)
+    # Calculate horizontal margins
+    margin_l = st.margin_l
+    margin_r = st.margin_r
+    if st.box_width is not None and st.box_width > 0:
+        side = max(10, (width - int(st.box_width)) // 2)
+        margin_l = side
+        margin_r = side
+
+    alpha_val = int(round((1.0 - max(0.05, min(1.0, st.text_opacity))) * 255))
+    pri_col = hex_to_ass_color(st.primary_color, default_alpha=alpha_val)
+    sec_col = hex_to_ass_color(st.secondary_color, default_alpha=alpha_val)
+    out_col = hex_to_ass_color(st.outline_color, default_alpha=0)
     bak_col = hex_to_ass_color(st.back_color, default_alpha=0x80)
 
     bold_val = -1 if st.bold else 0
@@ -326,7 +339,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Lyrics,{st.font_name},{st.font_size},{pri_col},{sec_col},{out_col},{bak_col},{bold_val},{italic_val},0,0,100,100,{st.letter_spacing},0,1,{st.outline},{st.shadow},{st.alignment},{st.margin_l},{st.margin_r},{st.margin_v},1
+Style: Lyrics,{st.font_name},{st.font_size},{pri_col},{sec_col},{out_col},{bak_col},{bold_val},{italic_val},0,0,100,100,{st.letter_spacing},0,1,{st.outline},{st.shadow},{st.alignment},{margin_l},{margin_r},{st.margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -340,8 +353,13 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         start, end = event["start"], event["end"]
 
         line_tags = []
-        if st.fade_in_ms > 0 or st.fade_out_ms > 0:
-            line_tags.append(f"\\fad({int(st.fade_in_ms)},{int(st.fade_out_ms)})")
+        f_in = st.fade_in_ms
+        f_out = st.fade_out_ms
+        if st.opacity_trailing:
+            f_in = max(180, f_in)
+            f_out = max(350, f_out)
+        if f_in > 0 or f_out > 0:
+            line_tags.append(f"\\fad({int(f_in)},{int(f_out)})")
         if st.blur > 0:
             line_tags.append(f"\\blur{st.blur:g}")
         if st.pos_x is not None and st.pos_y is not None:
@@ -365,14 +383,16 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                         parts.append("{%s%d}" % (tag_prefix, round(gap * 100)))
                 duration_cs = max(1, round((word["end"] - word["start"]) * 100))
                 prefix = "" if j == 0 else " "
-                parts.append("{%s%d}%s%s" % (tag_prefix, duration_cs, prefix, ass_escape(word["text"])))
+                w_text = word["text"].lower() if st.lowercase else word["text"]
+                parts.append("{%s%d}%s%s" % (tag_prefix, duration_cs, prefix, ass_escape(w_text)))
                 previous_end = word["end"]
 
             remaining = end - previous_end
             if remaining > 0.005:
                 parts.append("{%s%d}" % (tag_prefix, round(remaining * 100)))
         else:
-            parts.append(ass_escape(line["text"]))
+            raw_text = line["text"].lower() if st.lowercase else line["text"]
+            parts.append(ass_escape(raw_text))
 
         dialogues.append(
             f"Dialogue: 0,{ass_time(start)},{ass_time(end)},Lyrics,,0,0,0,,{''.join(parts)}"
@@ -488,6 +508,8 @@ def main():
     parser.add_argument("--font", default="Helvetica", help="caption font (default: Helvetica)")
     parser.add_argument("--fontsize", type=int, default=48, help="caption font size (default: 48)")
     parser.add_argument("--margin-v", type=int, default=760, help="bottom margin in pixels (default: 760)")
+    parser.add_argument("--box-width", type=int, help="subtitle column box width in pixels (e.g. 700)")
+    parser.add_argument("--no-lowercase", action="store_true", help="keep original lyric casing (default: lowercase)")
     parser.add_argument("--project-root", type=Path, help="override project root directory")
     parser.add_argument("--ass-only", action="store_true", help="write the .ass file but do not render")
     parser.add_argument("--timings", type=Path, help="write aligned line timings as JSON (default in --song mode: <output>.json)")
@@ -571,12 +593,17 @@ def main():
         print(f"Wrote timings: {timings}")
 
     duration = get_duration(video)
+    cli_style = CaptionStyle(
+        font_name=args.font,
+        font_size=args.fontsize,
+        margin_v=args.margin_v,
+        box_width=args.box_width,
+        lowercase=not args.no_lowercase,
+    )
     ass_text = build_ass(
         aligned,
         duration,
-        font=args.font,
-        fontsize=args.fontsize,
-        margin_v=args.margin_v,
+        style=cli_style,
     )
     ass_file = output.with_suffix(".ass")
     ass_file.write_text(ass_text, encoding="utf-8")

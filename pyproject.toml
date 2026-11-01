@@ -19,6 +19,11 @@ dependencies = [
   "faster-whisper>=1.0.0",
   "av>=12.0.0",
   "imageio-ffmpeg>=0.5.0",
+  "opencv-python>=4.8.0",
+  "librosa>=0.10.0",
+  "soundfile>=0.12.0",
+  "numpy>=1.22.0",
+  "scipy>=1.8.0",
 ]
 
 [project.optional-dependencies]
@@ -33,4 +38,4 @@ lyrics-sync = "lyrics_sync:main"
 content-tools-ui = "lyrics_sync_ui:main"
 
 [tool.setuptools]
-py-modules = ["lyrics_sync", "lyrics_sync_ui", "mov_to_mp4"]
+py-modules = ["lyrics_sync", "lyrics_sync_ui", "mov_to_mp4", "video_fx"]

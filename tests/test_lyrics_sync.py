@@ -86,8 +86,22 @@ class TestBuildASS(unittest.TestCase):
     def test_default_style_helvetica(self):
         ass = build_ass(self.lines, duration=5.0)
         self.assertIn("Style: Lyrics,Helvetica,48,", ass)
-        self.assertIn("\\fad(120,180)", ass)
+        self.assertIn("\\fad(", ass)
         self.assertIn("\\kf", ass)
+
+    def test_box_width_and_lowercase(self):
+        st = CaptionStyle(
+            box_width=600,
+            lowercase=True,
+            opacity_trailing=False,
+            fade_in_ms=100,
+            fade_out_ms=200,
+        )
+        ass = build_ass([{"text": "HELLO World", "start": 0.5, "end": 2.0, "words": []}], duration=5.0, style=st)
+        # 1080 - 600 = 480 // 2 = 240
+        self.assertIn(",240,240,760,1", ass)
+        self.assertIn("hello world", ass)
+        self.assertIn("\\fad(100,200)", ass)
 
     def test_custom_style_effects(self):
         st = CaptionStyle(
@@ -104,6 +118,7 @@ class TestBuildASS(unittest.TestCase):
             fade_in_ms=250,
             fade_out_ms=300,
             karaoke=False,
+            opacity_trailing=False,
             blur=1.5,
             pop_scale=20,
             letter_spacing=4,

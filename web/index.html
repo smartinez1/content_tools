@@ -12,7 +12,7 @@
       <span class="logo-badge">CT</span>
       <div>
         <h1>content_tools</h1>
-        <p class="tagline">Lyrics & Subtitles Studio</p>
+        <p class="tagline">Lyrics & Subtitles Studio (Lo-Fi Emo-Trap Engine)</p>
       </div>
     </div>
     <div class="song-bar">
@@ -30,9 +30,13 @@
     <section class="stage-pane">
       <div class="video-container" id="videoContainer">
         <video id="mainVideo" playsinline preload="auto"></video>
+        <!-- Real-time CSS approximation layers for Lo-Fi aesthetic -->
+        <div id="lofiScanlinesLayer" class="lofi-scanlines-layer active"></div>
+        <div id="lofiFogLayer" class="lofi-fog-layer active"></div>
+        
         <!-- Interactive draggable subtitle overlay -->
         <div id="subOverlay" class="subtitle-overlay" title="Drag to adjust position">
-          <span id="subText">Subtitle preview will appear here</span>
+          <span id="subText">subtitle preview will appear here</span>
         </div>
         <div id="videoOverlayHint" class="overlay-hint">Drag subtitles to reposition on video</div>
       </div>
@@ -41,7 +45,6 @@
         <button id="btnPlay" class="btn-transport">▶ Play</button>
         <span id="timeDisplay" class="time-readout">00:00 / 00:00</span>
         <input type="range" id="timelineSlider" class="timeline-slider" min="0" max="100" step="0.05" value="0">
-        <button id="btnToggleExact" class="btn-subtle" style="display:none;" id="btnExactToggle">Switch to Source</button>
       </div>
 
       <!-- Clickable Line Timeline -->
@@ -67,12 +70,12 @@
         <select id="presetSelect" class="full-width-select"></select>
       </div>
 
-      <!-- Typography -->
+      <!-- Typography & Box Width -->
       <div class="panel-section">
-        <div class="section-title">Typography (Default: Helvetica)</div>
+        <div class="section-title">Typography & Layout</div>
         <div class="grid-2">
           <div class="control-group">
-            <label for="fontSelect">Font Family</label>
+            <label for="fontInput">Font Family</label>
             <input type="text" id="fontInput" list="fontsList" placeholder="Helvetica" value="Helvetica">
             <datalist id="fontsList"></datalist>
           </div>
@@ -81,19 +84,26 @@
             <input type="range" id="fontSize" min="20" max="120" value="48">
           </div>
         </div>
-        <div class="checkbox-row">
+
+        <div class="control-group mt-sm">
+          <label for="boxWidth">Subtitle Box Width (<span id="boxWidthVal">680</span>px)</label>
+          <input type="range" id="boxWidth" min="280" max="1040" step="10" value="680" title="Adjust the column width to force text to wrap earlier into a block">
+        </div>
+
+        <div class="checkbox-row mt-sm">
           <label><input type="checkbox" id="fontBold" checked> Bold</label>
           <label><input type="checkbox" id="fontItalic"> Italic</label>
+          <label><input type="checkbox" id="fontLowercase" checked> Lowercase</label>
           <div class="control-group inline-group">
             <label for="letterSpacing">Spacing:</label>
-            <input type="number" id="letterSpacing" min="-5" max="30" value="0" style="width: 60px;">
+            <input type="number" id="letterSpacing" min="-5" max="30" value="0" style="width: 55px;">
           </div>
         </div>
       </div>
 
       <!-- Colors & Appearance -->
       <div class="panel-section">
-        <div class="section-title">Colors & Stroke</div>
+        <div class="section-title">Colors & Opacity</div>
         <div class="grid-3">
           <div class="control-group">
             <label for="primaryColor">Active / Sung</label>
@@ -111,12 +121,23 @@
 
         <div class="grid-2 mt-sm">
           <div class="control-group">
+            <label for="textOpacity">Text Opacity (<span id="textOpacityVal">88</span>%)</label>
+            <input type="range" id="textOpacity" min="40" max="100" step="2" value="88" title="Semi-transparent, never 100% solid white">
+          </div>
+          <div class="control-group">
             <label for="outlineWidth">Outline Width (<span id="outlineVal">4</span>)</label>
             <input type="range" id="outlineWidth" min="0" max="12" step="0.5" value="4">
           </div>
+        </div>
+
+        <div class="grid-2 mt-sm">
           <div class="control-group">
             <label for="shadowDepth">Shadow (<span id="shadowVal">2</span>)</label>
             <input type="range" id="shadowDepth" min="0" max="10" step="0.5" value="2">
+          </div>
+          <div class="control-group">
+            <label for="blurAmount">Text Blur (<span id="blurVal">0</span>)</label>
+            <input type="range" id="blurAmount" min="0" max="8" step="0.5" value="0">
           </div>
         </div>
       </div>
@@ -143,45 +164,37 @@
               <input type="range" id="marginV" min="0" max="1400" step="10" value="760">
             </div>
             <div class="control-group">
-              <label for="posX">X Offset (<span id="posXVal">Center</span>)</label>
+              <label for="posX">X Position (<span id="posXVal">Center</span>)</label>
               <input type="range" id="posX" min="0" max="1080" step="10" value="540">
             </div>
             <div class="control-group">
-              <label for="posY">Y Offset (<span id="posYVal">Bottom</span>)</label>
+              <label for="posY">Y Position (<span id="posYVal">Bottom</span>)</label>
               <input type="range" id="posY" min="0" max="1920" step="10" value="1160">
             </div>
           </div>
         </div>
       </div>
 
-      <!-- Effects & Animations -->
+      <!-- Effects & Motion -->
       <div class="panel-section">
-        <div class="section-title">Effects & Motion</div>
+        <div class="section-title">Motion & Karaoke</div>
         <div class="grid-2">
           <div class="control-group">
-            <label for="fadeIn">Fade In (<span id="fadeInVal">120</span>ms)</label>
-            <input type="range" id="fadeIn" min="0" max="800" step="20" value="120">
+            <label for="fadeIn">Fade In (<span id="fadeInVal">150</span>ms)</label>
+            <input type="range" id="fadeIn" min="0" max="800" step="20" value="150">
           </div>
           <div class="control-group">
-            <label for="fadeOut">Fade Out (<span id="fadeOutVal">180</span>ms)</label>
-            <input type="range" id="fadeOut" min="0" max="800" step="20" value="180">
-          </div>
-        </div>
-
-        <div class="grid-2 mt-sm">
-          <div class="control-group">
-            <label for="blurAmount">Text Blur (<span id="blurVal">0</span>)</label>
-            <input type="range" id="blurAmount" min="0" max="8" step="0.5" value="0">
-          </div>
-          <div class="control-group">
-            <label for="popScale">Pop Entrance (<span id="popVal">0</span>%)</label>
-            <input type="range" id="popScale" min="0" max="50" step="5" value="0">
+            <label for="fadeOut">Fade Out (<span id="fadeOutVal">250</span>ms)</label>
+            <input type="range" id="fadeOut" min="0" max="800" step="20" value="250">
           </div>
         </div>
 
         <div class="checkbox-row mt-sm">
-          <label><input type="checkbox" id="karaokeToggle" checked> Karaoke Highlight</label>
-          <select id="karaokeTag" class="compact-select">
+          <label><input type="checkbox" id="opacityTrailing" checked> Opacity Trailing Dissolve</label>
+          <label><input type="checkbox" id="karaokeToggle" checked> Karaoke</label>
+        </div>
+        <div class="mt-sm">
+          <select id="karaokeTag" class="full-width-select compact-select">
             <option value="kf" selected>Smooth Sweep (\kf)</option>
             <option value="k">Jump Step (\k)</option>
             <option value="ko">Outline Only (\ko)</option>
@@ -189,11 +202,58 @@
         </div>
       </div>
 
+      <!-- Lo-Fi Emo-Trap Aesthetic Engine (Audio-reactive) -->
+      <div class="panel-section aesthetic-section">
+        <div class="section-title">
+          <span>Lo-Fi Emo-Trap Aesthetics</span>
+          <label class="switch-label">
+            <input type="checkbox" id="lofiMasterToggle" checked> Active
+          </label>
+        </div>
+        <div class="aesthetic-toggles-grid">
+          <label class="aesthetic-check">
+            <input type="checkbox" id="fxElCocuy" checked>
+            <span>"El Cocuy" Wash (crushed blacks, violet tint, 65% warm desat)</span>
+          </label>
+          <label class="aesthetic-check">
+            <input type="checkbox" id="fxDecimate" checked>
+            <span>15fps Decimation (choppy camcorder stutter)</span>
+          </label>
+          <label class="aesthetic-check">
+            <input type="checkbox" id="fxIsoNoise" checked>
+            <span>Dynamic ISO Noise (audio-reactive film grain)</span>
+          </label>
+          <label class="aesthetic-check">
+            <input type="checkbox" id="fxChromatic" checked>
+            <span>Subtle Chromatic Aberration (radial R/B lens shift)</span>
+          </label>
+          <label class="aesthetic-check">
+            <input type="checkbox" id="fxFoggedGlass" checked>
+            <span>"Fogged Glass" (radial condensation blur)</span>
+          </label>
+          <label class="aesthetic-check">
+            <input type="checkbox" id="fxScanlines" checked>
+            <span>CRT Scanlines (glowing monitor horizontal lines)</span>
+          </label>
+          <label class="aesthetic-check">
+            <input type="checkbox" id="fxSidechain" checked>
+            <span>808s Sidechain Pumping (audio-reactive bass bounce)</span>
+          </label>
+          <label class="aesthetic-check">
+            <input type="checkbox" id="fxGlitch" checked>
+            <span>Fuzzed Chord Glitch (mid-range pixel slice displacement)</span>
+          </label>
+        </div>
+      </div>
+
       <!-- Actions & Render progress -->
       <div class="panel-section action-section">
-        <div class="action-buttons">
-          <button id="btnPreview10s" class="btn-secondary">🎬 Render 10s Preview</button>
-          <button id="btnRenderFull" class="btn-primary">🔥 Render Full Video</button>
+        <div class="action-buttons-column">
+          <button id="btnPreview10s" class="btn-secondary">🎬 Render 10s Lo-Fi Preview</button>
+          <div class="grid-2">
+            <button id="btnRenderFull" class="btn-primary">🔥 Render Full (Lo-Fi)</button>
+            <button id="btnRenderClean" class="btn-subtle-render">✨ Render Clean</button>
+          </div>
         </div>
 
         <!-- Job monitor -->
@@ -205,7 +265,7 @@
           <div class="progress-bar-container">
             <div id="jobProgressBar" class="progress-bar-fill" style="width: 0%;"></div>
           </div>
-          <p id="jobMessage" class="job-message">Starting ffmpeg...</p>
+          <p id="jobMessage" class="job-message">Starting pipeline...</p>
           <div id="jobOutputLinks" class="job-links"></div>
         </div>
       </div>

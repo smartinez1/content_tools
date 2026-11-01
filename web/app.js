@@ -1,19 +1,21 @@
-// content_tools Studio - Frontend JS Application
+// content_tools Studio - Frontend Application with Lo-Fi Emo-Trap Engine
 
 let currentSong = null;
 let timings = [];
 let presets = {};
 let activeJobPollInterval = null;
-let currentPreviewId = null;
 
-// Style state with Helvetica default
+// Style state
 let styleState = {
   font_name: "Helvetica",
   font_size: 48,
+  box_width: 680,
+  lowercase: true,
   primary_color: "#FFFF00",
   secondary_color: "#FFFFFF",
   outline_color: "#000000",
   back_color: "#80000000",
+  text_opacity: 0.88,
   bold: true,
   italic: false,
   outline: 4.0,
@@ -24,13 +26,29 @@ let styleState = {
   margin_v: 760,
   pos_x: null,
   pos_y: null,
-  fade_in_ms: 120,
-  fade_out_ms: 180,
+  fade_in_ms: 150,
+  fade_out_ms: 250,
+  opacity_trailing: true,
   karaoke: true,
   karaoke_tag: "kf",
   blur: 0.0,
   pop_scale: 0.0,
   letter_spacing: 0,
+};
+
+// Lo-Fi Emo-Trap Aesthetic State (All checked by default)
+let aestheticState = {
+  enabled: true,
+  el_cocuy_wash: true,
+  framerate_decimate: true,
+  target_fps: 15,
+  iso_noise: true,
+  noise_strength: 0.35,
+  chromatic_aberration: true,
+  fogged_glass_vignette: true,
+  crt_scanlines: true,
+  sidechain_pump: true,
+  fuzzed_glitch: true,
 };
 
 // DOM elements
@@ -41,49 +59,74 @@ const mainVideo = document.getElementById("mainVideo");
 const subOverlay = document.getElementById("subOverlay");
 const subText = document.getElementById("subText");
 const videoContainer = document.getElementById("videoContainer");
+const lofiScanlinesLayer = document.getElementById("lofiScanlinesLayer");
+const lofiFogLayer = document.getElementById("lofiFogLayer");
+
 const btnPlay = document.getElementById("btnPlay");
 const timeDisplay = document.getElementById("timeDisplay");
 const timelineSlider = document.getElementById("timelineSlider");
 const linesList = document.getElementById("linesList");
 const lineCount = document.getElementById("lineCount");
 
-// Styling elements
+// Typography & Layout elements
 const presetSelect = document.getElementById("presetSelect");
 const btnSavePreset = document.getElementById("btnSavePreset");
 const fontInput = document.getElementById("fontInput");
 const fontsList = document.getElementById("fontsList");
 const fontSize = document.getElementById("fontSize");
 const fontSizeVal = document.getElementById("fontSizeVal");
+const boxWidth = document.getElementById("boxWidth");
+const boxWidthVal = document.getElementById("boxWidthVal");
 const fontBold = document.getElementById("fontBold");
 const fontItalic = document.getElementById("fontItalic");
+const fontLowercase = document.getElementById("fontLowercase");
 const letterSpacing = document.getElementById("letterSpacing");
+
+// Colors & Appearance
 const primaryColor = document.getElementById("primaryColor");
 const secondaryColor = document.getElementById("secondaryColor");
 const outlineColor = document.getElementById("outlineColor");
+const textOpacity = document.getElementById("textOpacity");
+const textOpacityVal = document.getElementById("textOpacityVal");
 const outlineWidth = document.getElementById("outlineWidth");
 const outlineVal = document.getElementById("outlineVal");
 const shadowDepth = document.getElementById("shadowDepth");
 const shadowVal = document.getElementById("shadowVal");
+const blurAmount = document.getElementById("blurAmount");
+const blurVal = document.getElementById("blurVal");
+
+// Position elements
 const marginV = document.getElementById("marginV");
 const marginVVal = document.getElementById("marginVVal");
 const posX = document.getElementById("posX");
 const posXVal = document.getElementById("posXVal");
 const posY = document.getElementById("posY");
 const posYVal = document.getElementById("posYVal");
+
+// Motion elements
 const fadeIn = document.getElementById("fadeIn");
 const fadeInVal = document.getElementById("fadeInVal");
 const fadeOut = document.getElementById("fadeOut");
 const fadeOutVal = document.getElementById("fadeOutVal");
-const blurAmount = document.getElementById("blurAmount");
-const blurVal = document.getElementById("blurVal");
-const popScale = document.getElementById("popScale");
-const popVal = document.getElementById("popVal");
+const opacityTrailing = document.getElementById("opacityTrailing");
 const karaokeToggle = document.getElementById("karaokeToggle");
 const karaokeTag = document.getElementById("karaokeTag");
 
-// Buttons & Jobs
+// Aesthetic toggles
+const lofiMasterToggle = document.getElementById("lofiMasterToggle");
+const fxElCocuy = document.getElementById("fxElCocuy");
+const fxDecimate = document.getElementById("fxDecimate");
+const fxIsoNoise = document.getElementById("fxIsoNoise");
+const fxChromatic = document.getElementById("fxChromatic");
+const fxFoggedGlass = document.getElementById("fxFoggedGlass");
+const fxScanlines = document.getElementById("fxScanlines");
+const fxSidechain = document.getElementById("fxSidechain");
+const fxGlitch = document.getElementById("fxGlitch");
+
+// Action Buttons
 const btnPreview10s = document.getElementById("btnPreview10s");
 const btnRenderFull = document.getElementById("btnRenderFull");
+const btnRenderClean = document.getElementById("btnRenderClean");
 const jobCard = document.getElementById("jobCard");
 const jobTitle = document.getElementById("jobTitle");
 const jobProgressBar = document.getElementById("jobProgressBar");
@@ -100,6 +143,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   await loadSongs();
   setupEventListeners();
   setupDragReposition();
+  updateLofiPreviewCSS();
 });
 
 async function loadFonts() {
@@ -146,7 +190,6 @@ async function loadSongs() {
       songSelect.appendChild(opt);
     });
 
-    // Auto-select first playable song if available
     const firstPlayable = data.songs.find((s) => s.video_path);
     if (firstPlayable) {
       songSelect.value = firstPlayable.name;
@@ -194,8 +237,9 @@ function renderLineList() {
     const item = document.createElement("div");
     item.className = "line-item";
     item.dataset.index = index;
+    const txt = styleState.lowercase ? line.text.toLowerCase() : line.text;
     item.innerHTML = `
-      <span class="line-text">${escapeHtml(line.text)}</span>
+      <span class="line-text">${escapeHtml(txt)}</span>
       <span class="line-time">${formatTime(line.start)}</span>
     `;
     item.addEventListener("click", () => {
@@ -206,12 +250,26 @@ function renderLineList() {
   });
 }
 
+function updateLofiPreviewCSS() {
+  const lofiActive = aestheticState.enabled;
+  if (lofiScanlinesLayer) {
+    lofiScanlinesLayer.classList.toggle("active", lofiActive && aestheticState.crt_scanlines);
+  }
+  if (lofiFogLayer) {
+    lofiFogLayer.classList.toggle("active", lofiActive && aestheticState.fogged_glass_vignette);
+  }
+  if (mainVideo) {
+    mainVideo.classList.toggle("lofi-wash-active", lofiActive && aestheticState.el_cocuy_wash);
+  }
+  updateOverlay();
+}
+
 // Live Subtitle Overlay Renderer
 function updateOverlay() {
   if (!mainVideo.videoWidth) return;
 
   const t = mainVideo.currentTime;
-  const currentLine = timings.find((l) => t >= l.start - 0.15 && t <= l.end + 0.3);
+  const currentLine = timings.find((l) => t >= l.start - 0.15 && t <= l.end + 0.35);
 
   if (!currentLine) {
     subOverlay.style.display = "none";
@@ -220,11 +278,12 @@ function updateOverlay() {
 
   subOverlay.style.display = "block";
 
-  // Compute CSS styling based on styleState
+  // Typography
   subOverlay.style.fontFamily = `"${styleState.font_name}", Helvetica, Arial, sans-serif`;
   subOverlay.style.fontWeight = styleState.bold ? "bold" : "normal";
   subOverlay.style.fontStyle = styleState.italic ? "italic" : "normal";
   subOverlay.style.letterSpacing = `${styleState.letter_spacing}px`;
+  subOverlay.style.opacity = styleState.text_opacity !== undefined ? styleState.text_opacity : 0.88;
 
   // Scale font relative to container height vs 1920 reference video
   const vidHeight = mainVideo.clientHeight || videoContainer.clientHeight;
@@ -232,13 +291,28 @@ function updateOverlay() {
   const computedFontSize = Math.max(12, styleState.font_size * scaleRatio);
   subOverlay.style.fontSize = `${computedFontSize}px`;
 
-  // Outline and Shadow simulation via text-stroke and text-shadow
+  // Scale subtitle box width to force blocky line wrapping
+  const vidWidth = mainVideo.clientWidth || videoContainer.clientWidth;
+  if (styleState.box_width) {
+    const scaleRatioW = vidWidth / 1080;
+    const computedMaxW = Math.max(160, styleState.box_width * scaleRatioW);
+    subOverlay.style.maxWidth = `${computedMaxW}px`;
+  } else {
+    subOverlay.style.maxWidth = "90%";
+  }
+
+  // Outline, Shadow & Chromatic simulation
   const strokePx = Math.max(1, styleState.outline * scaleRatio * 1.5);
   const shadowPx = styleState.shadow * scaleRatio * 2;
   subOverlay.style.webkitTextStroke = `${strokePx}px ${styleState.outline_color}`;
-  subOverlay.style.textShadow = `${shadowPx}px ${shadowPx}px 0px ${styleState.outline_color}`;
 
-  // Blur & Pop simulation
+  let shadowStr = `${shadowPx}px ${shadowPx}px 0px ${styleState.outline_color}`;
+  if (aestheticState.enabled && aestheticState.chromatic_aberration) {
+    shadowStr += `, -2px 0 rgba(255, 30, 80, 0.65), 2px 0 rgba(0, 150, 255, 0.65)`;
+  }
+  subOverlay.style.textShadow = shadowStr;
+
+  // Blur
   const filters = [];
   if (styleState.blur > 0) {
     filters.push(`blur(${styleState.blur}px)`);
@@ -246,7 +320,6 @@ function updateOverlay() {
   subOverlay.style.filter = filters.length ? filters.join(" ") : "none";
 
   // Positioning
-  const vidWidth = mainVideo.clientWidth || videoContainer.clientWidth;
   const vidRect = mainVideo.getBoundingClientRect();
   const contRect = videoContainer.getBoundingClientRect();
 
@@ -260,7 +333,6 @@ function updateOverlay() {
     xPct = (styleState.pos_x / 1080) * 100;
     yPct = (styleState.pos_y / 1920) * 100;
   } else {
-    // Numpad alignment mapping
     const al = styleState.alignment;
     if ([7, 4, 1].includes(al)) xPct = 15;
     else if ([9, 6, 3].includes(al)) xPct = 85;
@@ -275,18 +347,20 @@ function updateOverlay() {
   subOverlay.style.top = `${offsetY + (vidHeight * yPct) / 100}px`;
   subOverlay.style.transform = "translate(-50%, -50%)";
 
-  // Karaoke word styling
+  // Karaoke and lowercase rendering
+  const fmt = (str) => styleState.lowercase ? (str || "").toLowerCase() : (str || "");
+
   if (styleState.karaoke && currentLine.words && currentLine.words.length) {
     let wordHtml = "";
     currentLine.words.forEach((w) => {
       const isSung = t >= w.end;
       const isSinging = t >= w.start && t < w.end;
       const col = isSung || isSinging ? styleState.primary_color : styleState.secondary_color;
-      wordHtml += `<span style="color: ${col}; margin: 0 4px;">${escapeHtml(w.text)}</span>`;
+      wordHtml += `<span style="color: ${col}; margin: 0 4px;">${escapeHtml(fmt(w.text))}</span>`;
     });
     subText.innerHTML = wordHtml;
   } else {
-    subText.textContent = currentLine.text;
+    subText.textContent = fmt(currentLine.text);
     subText.style.color = styleState.secondary_color;
   }
 
@@ -305,12 +379,9 @@ function updateOverlay() {
 // Drag overlay to reposition in video
 function setupDragReposition() {
   let isDragging = false;
-  let startX, startY;
 
   subOverlay.addEventListener("mousedown", (e) => {
     isDragging = true;
-    startX = e.clientX;
-    startY = e.clientY;
     subOverlay.classList.add("active-drag");
     e.preventDefault();
   });
@@ -345,7 +416,6 @@ function setupDragReposition() {
   });
 }
 
-// Synchronize video timeline
 function setupEventListeners() {
   songSelect.addEventListener("change", (e) => selectSong(e.target.value));
 
@@ -385,6 +455,12 @@ function setupEventListeners() {
     updateOverlay();
   });
 
+  boxWidth.addEventListener("input", (e) => {
+    styleState.box_width = parseInt(e.target.value, 10);
+    boxWidthVal.textContent = e.target.value;
+    updateOverlay();
+  });
+
   fontBold.addEventListener("change", (e) => {
     styleState.bold = e.target.checked;
     updateOverlay();
@@ -395,12 +471,18 @@ function setupEventListeners() {
     updateOverlay();
   });
 
+  fontLowercase.addEventListener("change", (e) => {
+    styleState.lowercase = e.target.checked;
+    renderLineList();
+    updateOverlay();
+  });
+
   letterSpacing.addEventListener("input", (e) => {
     styleState.letter_spacing = parseInt(e.target.value, 10) || 0;
     updateOverlay();
   });
 
-  // Colors
+  // Colors & Opacity
   primaryColor.addEventListener("input", (e) => {
     styleState.primary_color = e.target.value;
     updateOverlay();
@@ -416,6 +498,12 @@ function setupEventListeners() {
     updateOverlay();
   });
 
+  textOpacity.addEventListener("input", (e) => {
+    styleState.text_opacity = parseInt(e.target.value, 10) / 100.0;
+    textOpacityVal.textContent = e.target.value;
+    updateOverlay();
+  });
+
   outlineWidth.addEventListener("input", (e) => {
     styleState.outline = parseFloat(e.target.value);
     outlineVal.textContent = e.target.value;
@@ -425,6 +513,12 @@ function setupEventListeners() {
   shadowDepth.addEventListener("input", (e) => {
     styleState.shadow = parseFloat(e.target.value);
     shadowVal.textContent = e.target.value;
+    updateOverlay();
+  });
+
+  blurAmount.addEventListener("input", (e) => {
+    styleState.blur = parseFloat(e.target.value);
+    blurVal.textContent = e.target.value;
     updateOverlay();
   });
 
@@ -462,7 +556,7 @@ function setupEventListeners() {
     updateOverlay();
   });
 
-  // Effects
+  // Motion
   fadeIn.addEventListener("input", (e) => {
     styleState.fade_in_ms = parseInt(e.target.value, 10);
     fadeInVal.textContent = e.target.value;
@@ -473,15 +567,8 @@ function setupEventListeners() {
     fadeOutVal.textContent = e.target.value;
   });
 
-  blurAmount.addEventListener("input", (e) => {
-    styleState.blur = parseFloat(e.target.value);
-    blurVal.textContent = e.target.value;
-    updateOverlay();
-  });
-
-  popScale.addEventListener("input", (e) => {
-    styleState.pop_scale = parseFloat(e.target.value);
-    popVal.textContent = e.target.value;
+  opacityTrailing.addEventListener("change", (e) => {
+    styleState.opacity_trailing = e.target.checked;
   });
 
   karaokeToggle.addEventListener("change", (e) => {
@@ -492,6 +579,29 @@ function setupEventListeners() {
   karaokeTag.addEventListener("change", (e) => {
     styleState.karaoke_tag = e.target.value;
   });
+
+  // Aesthetic Toggles
+  lofiMasterToggle.addEventListener("change", (e) => {
+    aestheticState.enabled = e.target.checked;
+    updateLofiPreviewCSS();
+  });
+
+  const bindAesthetic = (elem, prop) => {
+    if (!elem) return;
+    elem.addEventListener("change", (e) => {
+      aestheticState[prop] = e.target.checked;
+      updateLofiPreviewCSS();
+    });
+  };
+
+  bindAesthetic(fxElCocuy, "el_cocuy_wash");
+  bindAesthetic(fxDecimate, "framerate_decimate");
+  bindAesthetic(fxIsoNoise, "iso_noise");
+  bindAesthetic(fxChromatic, "chromatic_aberration");
+  bindAesthetic(fxFoggedGlass, "fogged_glass_vignette");
+  bindAesthetic(fxScanlines, "crt_scanlines");
+  bindAesthetic(fxSidechain, "sidechain_pump");
+  bindAesthetic(fxGlitch, "fuzzed_glitch");
 
   // Presets load/save
   presetSelect.addEventListener("change", (e) => {
@@ -525,8 +635,15 @@ function setupEventListeners() {
     const curTime = mainVideo.currentTime || 24.0;
     startJob(
       "/api/preview",
-      { song_name: currentSong, style: styleState, start_sec: curTime, duration_sec: 10.0 },
-      "10-Second ffmpeg Preview",
+      {
+        song_name: currentSong,
+        style: styleState,
+        aesthetics: aestheticState,
+        apply_lofi: aestheticState.enabled,
+        start_sec: curTime,
+        duration_sec: 10.0,
+      },
+      "10-Second Lo-Fi Preview",
       (job) => {
         if (job.output_url) {
           mainVideo.src = job.output_url;
@@ -539,10 +656,37 @@ function setupEventListeners() {
 
   btnRenderFull.addEventListener("click", () => {
     if (!currentSong) return alert("Select a song first.");
-    if (!confirm(`Render full final video for "${currentSong}" with current subtitles style?`)) return;
-    startJob("/api/render", { song_name: currentSong, style: styleState }, "Full Video Render", (job) => {
-      alert("Render completed! Video saved to sm_content/");
-    });
+    if (!confirm(`Render full Lo-Fi video for "${currentSong}" with audio-reactive effects?`)) return;
+    startJob(
+      "/api/render",
+      {
+        song_name: currentSong,
+        style: styleState,
+        aesthetics: aestheticState,
+        lofi_mode: true,
+      },
+      "Full Lo-Fi Emo-Trap Render",
+      () => {
+        alert("Render completed! Video saved to sm_content/");
+      }
+    );
+  });
+
+  btnRenderClean.addEventListener("click", () => {
+    if (!currentSong) return alert("Select a song first.");
+    if (!confirm(`Render clean (fast) video for "${currentSong}"?`)) return;
+    startJob(
+      "/api/render",
+      {
+        song_name: currentSong,
+        style: styleState,
+        lofi_mode: false,
+      },
+      "Full Clean Video Render",
+      () => {
+        alert("Clean render completed! Video saved to sm_content/");
+      }
+    );
   });
 
   btnCancelJob.addEventListener("click", async () => {
@@ -557,12 +701,17 @@ function applyStyle(st) {
   fontInput.value = styleState.font_name || "Helvetica";
   fontSize.value = styleState.font_size;
   fontSizeVal.textContent = styleState.font_size;
+  boxWidth.value = styleState.box_width || 680;
+  boxWidthVal.textContent = styleState.box_width || 680;
   fontBold.checked = styleState.bold;
   fontItalic.checked = styleState.italic;
+  fontLowercase.checked = styleState.lowercase !== false;
   letterSpacing.value = styleState.letter_spacing || 0;
   primaryColor.value = styleState.primary_color;
   secondaryColor.value = styleState.secondary_color;
   outlineColor.value = styleState.outline_color;
+  textOpacity.value = Math.round((styleState.text_opacity !== undefined ? styleState.text_opacity : 0.88) * 100);
+  textOpacityVal.textContent = textOpacity.value;
   outlineWidth.value = styleState.outline;
   outlineVal.textContent = styleState.outline;
   shadowDepth.value = styleState.shadow;
@@ -573,12 +722,12 @@ function applyStyle(st) {
   fadeInVal.textContent = styleState.fade_in_ms;
   fadeOut.value = styleState.fade_out_ms;
   fadeOutVal.textContent = styleState.fade_out_ms;
+  opacityTrailing.checked = styleState.opacity_trailing !== false;
   blurAmount.value = styleState.blur || 0;
   blurVal.textContent = styleState.blur || 0;
-  popScale.value = styleState.pop_scale || 0;
-  popVal.textContent = styleState.pop_scale || 0;
   karaokeToggle.checked = styleState.karaoke;
   karaokeTag.value = styleState.karaoke_tag || "kf";
+  renderLineList();
   updateOverlay();
 }
 
