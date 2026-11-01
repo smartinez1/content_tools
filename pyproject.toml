@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "content-tools"
+version = "0.1.0"
+description = "Toolkit for lyrics synchronization, karaoke captions, subtitle styling, and video rendering"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "Santiago Martinez" }
+]
+dependencies = [
+  "fastapi>=0.111.0",
+  "uvicorn>=0.29.0",
+  "stable-ts>=2.19.0",
+  "faster-whisper>=1.0.0",
+  "av>=12.0.0",
+  "imageio-ffmpeg>=0.5.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+  "httpx>=0.27.0",
+  "ruff>=0.4.0",
+]
+
+[project.scripts]
+lyrics-sync = "lyrics_sync:main"
+content-tools-ui = "lyrics_sync_ui:main"
+
+[tool.setuptools]
+py-modules = ["lyrics_sync", "lyrics_sync_ui", "mov_to_mp4"]
