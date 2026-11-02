@@ -335,6 +335,18 @@ FX_LOOK_PRESETS = {
         "wash_amount": 0.5, "zoom_amount": 0.012, "fog_amount": 0.6, "ca_shift_px": 2,
         "glitch_probability": 0.2, "scanline_strength": 0.05, "noise_gain": 0.6, "target_fps": 24,
     },
+    "FX · Faded Film": {
+        "color_grade": True, "grade_fade": 28, "grade_contrast": 0.92, "grade_saturation": 0.8,
+        "wash_amount": 0.4, "wash_tint_b": 4, "wash_tint_g": 6, "wash_tint_r": 14,
+        "fog_amount": 0.5, "fog_haze": 0.25, "scanline_strength": 0.0, "noise_size": 2,
+        "noise_strength": 0.45, "ca_shift_px": 1, "glitch_probability": 0.0, "target_fps": 24,
+    },
+    "FX · VHS Tape": {
+        "ca_shift_px": 4, "ca_vertical_px": 2, "ca_pulse": 4, "scanline_strength": 0.18,
+        "scanline_thickness": 2, "scanline_spacing": 5, "glitch_threshold": 0.3,
+        "glitch_probability": 0.6, "glitch_max_slices": 9, "glitch_slice_height": 60,
+        "glitch_swap_chance": 0.05, "noise_size": 2, "fog_haze": 0.15, "target_fps": 20,
+    },
     "FX · Heavy Lo-Fi": {
         "wash_tint": 1.5, "zoom_amount": 0.05, "fog_amount": 1.2, "fog_blur": 14, "ca_shift_px": 6,
         "glitch_threshold": 0.35, "glitch_probability": 0.7, "glitch_max_shift": 40,

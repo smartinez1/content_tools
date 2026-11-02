@@ -162,7 +162,7 @@ class TestBuildAssFit(unittest.TestCase):
 class TestNoiseKnob(unittest.TestCase):
     def frame_after(self, **cfg):
         config = AestheticConfig(
-            el_cocuy_wash=False, fogged_glass_vignette=False, chromatic_aberration=False,
+            color_wash=False, fogged_glass_vignette=False, chromatic_aberration=False,
             fuzzed_glitch=False, crt_scanlines=False, sidechain_pump=False,
             framerate_decimate=False, seed=3, **cfg,
         )

@@ -2,7 +2,7 @@
 """Audio-reactive Lo-Fi / Emo-Trap aesthetic video processing pipeline.
 
 Visual Identity:
-- "El Cocuy" Wash: Crushed blacks, cool violet/slate tint, heavy desaturation on warm tones.
+- Color Wash: Crushed blacks, cool violet/slate tint, heavy desaturation on warm tones.
 - "Ruido Blanco": Audio-reactive ISO noise on high-frequencies, 12-15fps decimation, chromatic aberration.
 - "Fogged Glass": Radial Gaussian blur condensation vignette and faint CRT scanlines.
 - "Emo-Trap Bounce": Sidechain pumping zoom on 808/kicks and mid-range fuzzed chord glitches.
@@ -31,43 +31,66 @@ BANDS = ("low", "mid", "high")
 class AestheticConfig:
     enabled: bool = True
 
-    # --- El Cocuy wash: crushed blacks, cold tint, desaturated warm tones
-    el_cocuy_wash: bool = True
+    # --- Color wash: crushed blacks, cold tint, desaturated warm tones
+    color_wash: bool = True
     wash_amount: float = 1.0        # blend original -> washed
     wash_desat: float = 1.0         # 1.0 = today's 65% warm / 30% other desaturation
     wash_tint: float = 1.0          # strength of the violet shadow tint
+    wash_crush: float = 1.0         # how hard the blacks are crushed (0 = leave tones alone)
+    wash_tint_b: float = 16.0       # shadow tint per channel (violet = +blue, -green, +red)
+    wash_tint_g: float = -6.0
+    wash_tint_r: float = 10.0
+
+    # --- Color grade: plain brightness / contrast / saturation / faded blacks (off by default)
+    color_grade: bool = False
+    grade_brightness: float = 0.0   # added to every channel (-60..60)
+    grade_contrast: float = 1.0
+    grade_saturation: float = 1.0
+    grade_fade: float = 0.0         # lifts the blacks (faded-film look)
 
     # --- 808 sidechain zoom (low band)
     sidechain_pump: bool = True
     zoom_amount: float = 0.025      # max zoom at full bass (2.5%)
     zoom_curve: float = 1.6         # response exponent (higher = only the loudest hits)
+    zoom_base: float = 0.0          # constant extra zoom, on top of the bass bounce
+    zoom_origin_x: float = 0.5      # zoom anchor (0 = left edge, 1 = right edge)
+    zoom_origin_y: float = 0.5      # (0 = top, 1 = bottom)
 
     # --- Fogged glass radial blur
     fogged_glass_vignette: bool = True
     fog_amount: float = 1.0
     fog_blur: float = 9.0           # gaussian sigma
     fog_pulse: float = 0.25         # how much bass widens the fog (needs sidechain_pump)
+    fog_radius: float = 0.35        # how far from the centre the fog starts (0 = centre, 0.9 = corners only)
+    fog_haze: float = 0.0           # milky white veil mixed into the fogged area
 
     # --- Chromatic aberration
     chromatic_aberration: bool = True
     ca_shift_px: int = 3
+    ca_vertical_px: int = 0         # extra vertical channel split
+    ca_pulse: float = 0.0           # extra horizontal shift (px) at full bass
 
     # --- Fuzzed glitch (mid band)
     fuzzed_glitch: bool = True
     glitch_threshold: float = 0.45  # mid-band level needed to glitch
     glitch_probability: float = 0.4 # chance per frame once above the threshold
     glitch_max_shift: int = 18      # max horizontal slice shift (px)
+    glitch_max_slices: int = 5      # slices displaced per glitch frame (2..this)
+    glitch_slice_height: int = 28   # tallest slice (px)
+    glitch_swap_chance: float = 0.2 # chance a slice also swaps its red/blue channels
 
     # --- CRT scanlines
     crt_scanlines: bool = True
     scanline_strength: float = 0.09
     scanline_spacing: int = 3
+    scanline_thickness: int = 1     # dark rows per line (must stay below the spacing)
 
     # --- Dynamic ISO noise (high band)
     iso_noise: bool = True
     noise_strength: float = 0.35    # base level
     noise_audio: float = 0.7        # extra noise driven by the high band
     noise_gain: float = 1.0         # overall multiplier (0 = silent)
+    noise_size: int = 1             # grain size in pixels (1 = fine, 4 = chunky)
 
     # --- Frame rate decimation
     framerate_decimate: bool = True
@@ -138,20 +161,40 @@ AESTHETIC_SPECS: dict[str, dict] = {
     "wash_amount": _spec("wash", "Amount", 0, 1, 0.01, hint="Blend between the original and the washed look"),
     "wash_desat": _spec("wash", "Desaturation", 0, 1.5, 0.01, hint="1.0 = original strength"),
     "wash_tint": _spec("wash", "Violet tint", 0, 2, 0.05),
+    "wash_crush": _spec("wash", "Black crush", 0, 2, 0.05, hint="How hard the blacks are crushed"),
+    "wash_tint_b": _spec("wash", "Tint blue", -40, 40, 1, hint="Shadow tint, per channel"),
+    "wash_tint_g": _spec("wash", "Tint green", -40, 40, 1),
+    "wash_tint_r": _spec("wash", "Tint red", -40, 40, 1),
+    "grade_brightness": _spec("grade", "Brightness", -60, 60, 1),
+    "grade_contrast": _spec("grade", "Contrast", 0.5, 1.8, 0.02),
+    "grade_saturation": _spec("grade", "Saturation", 0, 2, 0.02),
+    "grade_fade": _spec("grade", "Faded blacks", 0, 80, 1, hint="Lifts the blacks for a faded-film look"),
     "zoom_amount": _spec("zoom", "Max zoom", 0, 0.1, 0.005, hint="Zoom at full bass level"),
     "zoom_curve": _spec("zoom", "Response curve", 0.5, 4, 0.1, hint="Higher = only the loudest hits bounce"),
+    "zoom_base": _spec("zoom", "Constant zoom", 0, 0.1, 0.005, hint="Always zoomed in by this much"),
+    "zoom_origin_x": _spec("zoom", "Anchor X", 0, 1, 0.05, hint="0 = left, 1 = right"),
+    "zoom_origin_y": _spec("zoom", "Anchor Y", 0, 1, 0.05, hint="0 = top, 1 = bottom"),
     "fog_amount": _spec("fog", "Amount", 0, 1.5, 0.05),
     "fog_blur": _spec("fog", "Blur", 1, 30, 1),
     "fog_pulse": _spec("fog", "Bass pulse", 0, 1, 0.05, hint="Needs the sidechain zoom effect enabled"),
+    "fog_radius": _spec("fog", "Clear centre", 0, 0.9, 0.05, hint="Fog starts this far from the centre"),
+    "fog_haze": _spec("fog", "Haze", 0, 1, 0.05, hint="Milky white veil in the fogged area"),
     "ca_shift_px": _spec("chroma", "Shift (px)", 0, 12, 1),
+    "ca_vertical_px": _spec("chroma", "Vertical shift (px)", 0, 12, 1),
+    "ca_pulse": _spec("chroma", "Bass pulse (px)", 0, 12, 0.5, hint="Extra shift on bass hits"),
     "glitch_threshold": _spec("glitch", "Threshold", 0, 1, 0.01, hint="Mid-band level needed to glitch"),
     "glitch_probability": _spec("glitch", "Probability", 0, 1, 0.05),
     "glitch_max_shift": _spec("glitch", "Max shift (px)", 0, 80, 1),
+    "glitch_max_slices": _spec("glitch", "Max slices", 2, 12, 1),
+    "glitch_slice_height": _spec("glitch", "Slice height (px)", 12, 160, 2),
+    "glitch_swap_chance": _spec("glitch", "Colour swap", 0, 1, 0.05, hint="Chance a slice swaps red/blue"),
     "scanline_strength": _spec("scanlines", "Strength", 0, 0.5, 0.01),
     "scanline_spacing": _spec("scanlines", "Spacing (rows)", 2, 12, 1),
+    "scanline_thickness": _spec("scanlines", "Thickness (rows)", 1, 6, 1),
     "noise_strength": _spec("noise", "Base level", 0, 1, 0.01),
     "noise_audio": _spec("noise", "Audio reactivity", 0, 2, 0.05, hint="Extra grain driven by hi-hats"),
     "noise_gain": _spec("noise", "Overall gain", 0, 2, 0.05),
+    "noise_size": _spec("noise", "Grain size (px)", 1, 4, 1),
     "target_fps": _spec("fps", "Frame rate", 6, 30, 1),
     "seed": _spec("fps", "Seed", -1, 2**31 - 1, 1, ui=False),
 }
@@ -170,8 +213,10 @@ for _band in BANDS:
 _RANGES = {k: (v["min"], v["max"]) for k, v in AESTHETIC_SPECS.items()}
 
 AESTHETIC_GROUPS = [
-    {"id": "wash", "label": '"El Cocuy" Wash', "toggle": "el_cocuy_wash",
+    {"id": "wash", "label": "Color Wash", "toggle": "color_wash",
      "hint": "Crushed blacks, violet shadows, desaturated warm tones"},
+    {"id": "grade", "label": "Color Grade", "toggle": "color_grade",
+     "hint": "Brightness, contrast, saturation and faded blacks"},
     {"id": "zoom", "label": "808 Sidechain Zoom", "toggle": "sidechain_pump",
      "hint": "Bass-driven zoom bounce (low band)"},
     {"id": "fog", "label": "Fogged Glass", "toggle": "fogged_glass_vignette",
@@ -359,42 +404,56 @@ def audio_curves(
     )
 
 
-def build_radial_mask(height: int, width: int) -> np.ndarray:
-    """Precompute a smooth radial vignette mask where center is 0 (clear) and edges are 1 (fogged)."""
+def build_radial_mask(height: int, width: int, radius: float = 0.35) -> np.ndarray:
+    """Precompute a smooth radial vignette mask where center is 0 (clear) and edges are 1 (fogged).
+
+    ``radius`` is the normalised distance from the centre where the fog starts."""
     y, x = np.ogrid[:height, :width]
     center_y, center_x = height / 2.0, width / 2.0
     # Normalized radial distance [0, 1]
     norm_dist = np.sqrt(((x - center_x) / center_x) ** 2 + ((y - center_y) / center_y) ** 2)
-    # Threshold at 0.35, ramping up to 1.0 at outer edge
-    mask = np.clip((norm_dist - 0.35) / 0.65, 0.0, 1.0)
+    # Threshold at ``radius``, ramping up to 1.0 at outer edge
+    mask = np.clip((norm_dist - radius) / max(0.05, 1.0 - radius), 0.0, 1.0)
     # Smooth cosine curve
     mask = 0.5 - 0.5 * np.cos(mask * np.pi)
     return mask.astype(np.float32)[:, :, np.newaxis]
 
 
-def build_scanline_mask(height: int, width: int, strength: float = 0.09, spacing: int = 3) -> np.ndarray:
-    """Precompute subtle CRT monitor horizontal scanlines (every ``spacing``th row darkened)."""
+def build_scanline_mask(
+    height: int, width: int, strength: float = 0.09, spacing: int = 3, thickness: int = 1
+) -> np.ndarray:
+    """Precompute subtle CRT monitor horizontal scanlines: ``thickness`` rows of every ``spacing``
+    rows are darkened."""
+    spacing = max(1, int(spacing))
+    thickness = max(1, min(int(thickness), max(1, spacing - 1)))
     scanlines = np.ones((height, 1, 1), dtype=np.float32)
-    scanlines[::max(1, int(spacing))] = 1.0 - strength
+    for row in range(thickness):
+        scanlines[row::spacing] = 1.0 - strength
     return scanlines
 
 
-def apply_el_cocuy_wash(
+def apply_color_wash(
     frame: np.ndarray,
     amount: float = 1.0,
     desat: float = 1.0,
     tint: float = 1.0,
+    crush: float = 1.0,
+    tint_bgr: tuple[float, float, float] = (16.0, -6.0, 10.0),
 ) -> np.ndarray:
     """Crushed blacks, cold violet/slate shadows, and desaturation of warm colors.
 
     ``amount`` blends between the original and the washed frame; ``desat`` and ``tint`` scale the
-    desaturation (1.0 = 65% on warm hues, 30% elsewhere) and the violet shadow tint.
+    desaturation (1.0 = 65% on warm hues, 30% elsewhere) and the shadow tint; ``crush`` scales the
+    black crush and ``tint_bgr`` is the per-channel tint at ``tint`` = 1.
     """
     if amount <= 0:
         return frame
     # 1. Crushed blacks via power curve
     f = frame.astype(np.float32) / 255.0
-    f = np.clip(np.power(f, 1.22) * 1.05 - 0.04, 0.0, 1.0)
+    if crush == 1.0:
+        f = np.clip(np.power(f, 1.22) * 1.05 - 0.04, 0.0, 1.0)
+    else:
+        f = np.clip(np.power(f, 1.0 + 0.22 * crush) * (1.0 + 0.05 * crush) - 0.04 * crush, 0.0, 1.0)
 
     # 2. Desaturation of warm channels in HSV space
     hsv = cv2.cvtColor((f * 255.0).astype(np.uint8), cv2.COLOR_BGR2HSV).astype(np.float32)
@@ -419,8 +478,8 @@ def apply_el_cocuy_wash(
     lum = (0.114 * washed[:, :, 0] + 0.587 * washed[:, :, 1] + 0.299 * washed[:, :, 2]) / 255.0
     shadow_factor = np.clip(1.0 - lum, 0.0, 1.0)[:, :, np.newaxis]
 
-    # Violet/slate tint vector: [Blue=+16, Green=-6, Red=+10]
-    tint_vec = np.array([16.0, -6.0, 10.0], dtype=np.float32) * tint
+    # Tint vector, default violet/slate: [Blue=+16, Green=-6, Red=+10]
+    tint_vec = np.array(tint_bgr, dtype=np.float32) * tint
     washed = np.clip(washed + tint_vec * shadow_factor, 0, 255).astype(np.uint8)
 
     if amount >= 1.0:
@@ -429,24 +488,63 @@ def apply_el_cocuy_wash(
     return np.clip(blended, 0, 255).astype(np.uint8)
 
 
-def apply_chromatic_aberration(frame: np.ndarray, shift_px: int = 3) -> np.ndarray:
-    """Shift Red channel left and Blue channel right for cheap lens distortion."""
-    shift_px = int(shift_px)
-    if shift_px <= 0:
+def apply_color_grade(
+    frame: np.ndarray,
+    brightness: float = 0.0,
+    contrast: float = 1.0,
+    saturation: float = 1.0,
+    fade: float = 0.0,
+) -> np.ndarray:
+    """Plain grade: contrast around mid-grey, brightness offset, faded (lifted) blacks, saturation.
+    Neutral values (0, 1, 1, 0) return the frame untouched."""
+    if brightness == 0.0 and contrast == 1.0 and saturation == 1.0 and fade == 0.0:
+        return frame
+    f = frame.astype(np.float32)
+    if contrast != 1.0 or brightness != 0.0:
+        f = (f - 128.0) * contrast + 128.0 + brightness
+    if fade > 0:
+        f = f * (1.0 - fade / 255.0) + fade
+    out = np.clip(f, 0, 255).astype(np.uint8)
+    if saturation != 1.0:
+        hsv = cv2.cvtColor(out, cv2.COLOR_BGR2HSV).astype(np.float32)
+        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * saturation, 0, 255)
+        out = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+    return out
+
+
+def apply_chromatic_aberration(frame: np.ndarray, shift_px: int = 3, vertical_px: int = 0) -> np.ndarray:
+    """Shift Red channel left and Blue channel right (and, optionally, Red up / Blue down)
+    for cheap lens distortion."""
+    h, w = frame.shape[:2]
+    shift_px = min(int(shift_px), w - 1)
+    vertical_px = min(int(vertical_px), h - 1)
+    if shift_px <= 0 and vertical_px <= 0:
         return frame
     b, g, r = cv2.split(frame)
 
-    # Shift Blue right
-    b_shifted = np.zeros_like(b)
-    b_shifted[:, shift_px:] = b[:, :-shift_px]
-    b_shifted[:, :shift_px] = b[:, :1]
+    if shift_px > 0:
+        # Shift Blue right
+        b_shifted = np.zeros_like(b)
+        b_shifted[:, shift_px:] = b[:, :-shift_px]
+        b_shifted[:, :shift_px] = b[:, :1]
 
-    # Shift Red left
-    r_shifted = np.zeros_like(r)
-    r_shifted[:, :-shift_px] = r[:, shift_px:]
-    r_shifted[:, -shift_px:] = r[:, -1:]
+        # Shift Red left
+        r_shifted = np.zeros_like(r)
+        r_shifted[:, :-shift_px] = r[:, shift_px:]
+        r_shifted[:, -shift_px:] = r[:, -1:]
+        b, r = b_shifted, r_shifted
 
-    return cv2.merge([b_shifted, g, r_shifted])
+    if vertical_px > 0:
+        v = vertical_px
+        b_down = np.zeros_like(b)
+        b_down[v:] = b[:-v]
+        b_down[:v] = b[:1]
+        r_up = np.zeros_like(r)
+        r_up[:-v] = r[v:]
+        r_up[-v:] = r[-1:]
+        b, r = b_down, r_up
+
+    return cv2.merge([b, g, r])
 
 
 def apply_fuzzed_glitch(
@@ -456,6 +554,9 @@ def apply_fuzzed_glitch(
     threshold: float = 0.45,
     probability: float = 0.4,
     max_shift: int = 18,
+    max_slices: int = 5,
+    slice_height: int = 28,
+    swap_chance: float = 0.2,
 ) -> np.ndarray:
     """Horizontal pixel displacement slices representing breakcore distortion."""
     h, w = frame.shape[:2]
@@ -466,32 +567,35 @@ def apply_fuzzed_glitch(
         return frame
 
     res = frame.copy()
-    num_slices = int(rng.integers(2, 6))
+    num_slices = int(rng.integers(2, max(2, int(max_slices)) + 1))
 
     for _ in range(num_slices):
         y1 = int(rng.integers(0, h - 30))
-        y2 = min(h, y1 + int(rng.integers(8, 28)))
+        y2 = min(h, y1 + int(rng.integers(8, max(9, int(slice_height)))))
         shift = int(int(rng.integers(-max_shift, max_shift + 1)) * intensity)
         if shift != 0:
             slice_data = res[y1:y2, :]
             res[y1:y2, :] = np.roll(slice_data, shift, axis=1)
             # Occasional color channel inversion on glitch slice
-            if rng.random() < 0.2:
+            if rng.random() < swap_chance:
                 res[y1:y2, :, 0], res[y1:y2, :, 2] = res[y1:y2, :, 2], res[y1:y2, :, 0]
 
     return res
 
 
-def apply_sidechain_zoom(frame: np.ndarray, scale: float) -> np.ndarray:
-    """Zoom in frame slightly around the center to simulate pumping."""
+def apply_sidechain_zoom(
+    frame: np.ndarray, scale: float, origin: tuple[float, float] = (0.5, 0.5)
+) -> np.ndarray:
+    """Zoom in frame slightly to simulate pumping; ``origin`` is the fixed point as a fraction
+    of the width/height (0.5, 0.5 = centre)."""
     if scale <= 1.002:
         return frame
     h, w = frame.shape[:2]
     new_w = int(w * scale)
     new_h = int(h * scale)
     resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-    x1 = (new_w - w) // 2
-    y1 = (new_h - h) // 2
+    x1 = int((new_w - w) * origin[0])
+    y1 = int((new_h - h) * origin[1])
     return resized[y1:y1 + h, x1:x1 + w]
 
 
@@ -525,18 +629,30 @@ def build_fx_context(
     if rng is None:
         rng = np.random.default_rng(cfg.seed if cfg.seed >= 0 else None)
     active = cfg.enabled
-    radial = build_radial_mask(height, width) * cfg.fog_amount if (
+    radial = build_radial_mask(height, width, cfg.fog_radius) * cfg.fog_amount if (
         active and cfg.fogged_glass_vignette and cfg.fog_amount > 0
     ) else None
-    scanlines = build_scanline_mask(height, width, cfg.scanline_strength, cfg.scanline_spacing) if (
+    scanlines = build_scanline_mask(
+        height, width, cfg.scanline_strength, cfg.scanline_spacing, cfg.scanline_thickness
+    ) if (
         active and cfg.crt_scanlines and cfg.scanline_strength > 0
     ) else None
     ksize = max(3, int(round(3 * cfg.fog_blur)) | 1)
     # A few unit-variance noise tiles, larger than the frame; each frame crops a random window
     # (a view, no copy) and scales it. Much cheaper than drawing h*w normals per frame.
-    noise_pool = rng.standard_normal(
-        (_NOISE_POOL, height + _NOISE_PAD, width + _NOISE_PAD), dtype=np.float32
-    ) if (active and cfg.iso_noise and cfg.noise_gain > 0) else None
+    noise_pool = None
+    if active and cfg.iso_noise and cfg.noise_gain > 0:
+        size = max(1, cfg.noise_size)
+        pad_h, pad_w = height + _NOISE_PAD, width + _NOISE_PAD
+        if size == 1:
+            noise_pool = rng.standard_normal((_NOISE_POOL, pad_h, pad_w), dtype=np.float32)
+        else:  # chunky grain: draw at lower resolution, then repeat pixels
+            small = rng.standard_normal(
+                (_NOISE_POOL, -(-pad_h // size), -(-pad_w // size)), dtype=np.float32
+            )
+            noise_pool = np.ascontiguousarray(
+                np.repeat(np.repeat(small, size, axis=1), size, axis=2)[:, :pad_h, :pad_w]
+            )
     return FxContext(cfg, height, width, rng, radial, scanlines, ksize, noise_pool)
 
 
@@ -554,28 +670,45 @@ def apply_fx_frame(
     low, mid, high = float(low), float(mid), float(high)
 
     # 1. Audio-reactive sidechain zoom
-    if cfg.sidechain_pump and cfg.zoom_amount > 0:
-        frame = apply_sidechain_zoom(frame, 1.0 + (low ** cfg.zoom_curve) * cfg.zoom_amount)
+    if cfg.sidechain_pump and (cfg.zoom_amount > 0 or cfg.zoom_base > 0):
+        frame = apply_sidechain_zoom(
+            frame,
+            1.0 + cfg.zoom_base + (low ** cfg.zoom_curve) * cfg.zoom_amount,
+            (cfg.zoom_origin_x, cfg.zoom_origin_y),
+        )
 
-    # 2. El Cocuy wash (crushed blacks & cold tint)
-    if cfg.el_cocuy_wash and cfg.wash_amount > 0:
-        frame = apply_el_cocuy_wash(frame, cfg.wash_amount, cfg.wash_desat, cfg.wash_tint)
+    # 2. Color wash (crushed blacks & cold tint)
+    if cfg.color_wash and cfg.wash_amount > 0:
+        frame = apply_color_wash(
+            frame, cfg.wash_amount, cfg.wash_desat, cfg.wash_tint, cfg.wash_crush,
+            (cfg.wash_tint_b, cfg.wash_tint_g, cfg.wash_tint_r),
+        )
+
+    # 2b. Color grade (off by default)
+    if cfg.color_grade:
+        frame = apply_color_grade(
+            frame, cfg.grade_brightness, cfg.grade_contrast, cfg.grade_saturation, cfg.grade_fade
+        )
 
     # 3. Fogged glass (radial condensation blur)
     if ctx.radial is not None:
         blurred = cv2.GaussianBlur(frame, (ctx.blur_ksize, ctx.blur_ksize), sigmaX=cfg.fog_blur)
+        if cfg.fog_haze > 0:
+            blurred = (blurred.astype(np.float32) * (1.0 - cfg.fog_haze) + 255.0 * cfg.fog_haze).astype(np.uint8)
         pulse = low * cfg.fog_pulse if cfg.sidechain_pump else 0.0
         mask = np.clip(ctx.radial * (1.0 + pulse), 0.0, 1.0)
         frame = (frame.astype(np.float32) * (1.0 - mask) + blurred.astype(np.float32) * mask).astype(np.uint8)
 
     # 4. Chromatic aberration
-    if cfg.chromatic_aberration and cfg.ca_shift_px > 0:
-        frame = apply_chromatic_aberration(frame, shift_px=cfg.ca_shift_px)
+    if cfg.chromatic_aberration:
+        shift = cfg.ca_shift_px + (int(round(low * cfg.ca_pulse)))
+        frame = apply_chromatic_aberration(frame, shift_px=shift, vertical_px=cfg.ca_vertical_px)
 
     # 5. Fuzzed chord glitch
     if cfg.fuzzed_glitch:
         frame = apply_fuzzed_glitch(
-            frame, mid, ctx.rng, cfg.glitch_threshold, cfg.glitch_probability, cfg.glitch_max_shift
+            frame, mid, ctx.rng, cfg.glitch_threshold, cfg.glitch_probability, cfg.glitch_max_shift,
+            cfg.glitch_max_slices, cfg.glitch_slice_height, cfg.glitch_swap_chance,
         )
 
     # 6. CRT scanlines

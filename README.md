@@ -12,7 +12,7 @@ Modern media toolkit for lyrics alignment, karaoke captions burn-in, typography 
   - Colors, outline stroke, drop shadow, text blur, pop scaling, letter spacing.
   - 3x3 alignment grid and absolute coordinate positioning.
   - **Lo-Fi Emo-Trap Audio-Reactive Engine**:
-    - "El Cocuy" wash (crushed blacks, cold violet/slate tint, 65% warm desaturation).
+    - Color wash (crushed blacks, cold violet/slate tint, 65% warm desaturation) with an optional brightness/contrast/saturation/faded-blacks grade.
     - 15fps frame-rate decimation for hand-held camcorder feel.
     - Dynamic ISO noise layer mapped to audio high-frequencies (hi-hats/breathiness).
     - Subtle radial chromatic aberration (3px R/B shift).

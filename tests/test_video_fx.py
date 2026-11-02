@@ -20,7 +20,7 @@ from video_fx import (
     aesthetic_schema,
     analyze_audio_bands,
     apply_chromatic_aberration,
-    apply_el_cocuy_wash,
+    apply_color_wash,
     apply_fuzzed_glitch,
     apply_fx_frame,
     apply_sidechain_zoom,
@@ -37,7 +37,7 @@ class TestVideoFX(unittest.TestCase):
     def test_config_defaults(self):
         cfg = AestheticConfig()
         self.assertTrue(cfg.enabled)
-        self.assertTrue(cfg.el_cocuy_wash)
+        self.assertTrue(cfg.color_wash)
         self.assertTrue(cfg.framerate_decimate)
         self.assertEqual(cfg.target_fps, 15)
         self.assertTrue(cfg.sidechain_pump)
@@ -61,8 +61,8 @@ class TestVideoFX(unittest.TestCase):
     def test_image_transforms(self):
         frame = np.full((100, 100, 3), 128, dtype=np.uint8)
 
-        # 1. El Cocuy Wash
-        washed = apply_el_cocuy_wash(frame)
+        # 1. Color wash
+        washed = apply_color_wash(frame)
         self.assertEqual(washed.shape, frame.shape)
         self.assertEqual(washed.dtype, np.uint8)
 
@@ -150,7 +150,7 @@ class TestConfigKnobs(unittest.TestCase):
             "glitch_max_shift": 7.6,     # float -> rounded int
             "noise_gain": "nan",         # not finite -> default kept
             "wash_amount": "abc",        # not numeric -> default kept
-            "el_cocuy_wash": "false",    # str bool
+            "color_wash": "false",    # str bool
         })
         self.assertEqual(cfg.zoom_amount, AESTHETIC_SPECS["zoom_amount"]["max"])
         self.assertEqual(cfg.ca_shift_px, 4)
@@ -158,7 +158,7 @@ class TestConfigKnobs(unittest.TestCase):
         self.assertEqual(cfg.glitch_max_shift, 8)
         self.assertEqual(cfg.noise_gain, 1.0)
         self.assertEqual(cfg.wash_amount, 1.0)
-        self.assertFalse(cfg.el_cocuy_wash)
+        self.assertFalse(cfg.color_wash)
 
     def test_percentiles_stay_ordered(self):
         cfg = AestheticConfig.from_dict({"low_floor": 50, "low_ceiling": 50})
@@ -205,7 +205,7 @@ class TestFxFrame(unittest.TestCase):
         got = apply_fx_frame(frame, build_fx_context(cfg, h, w), low=low)
 
         f = apply_sidechain_zoom(frame, 1.0 + float(low ** 1.6) * 0.025)
-        f = apply_el_cocuy_wash(f)
+        f = apply_color_wash(f)
         blurred = cv2.GaussianBlur(f, (27, 27), sigmaX=9)
         mask = np.clip(build_radial_mask(h, w) * (1.0 + low * 0.25), 0.0, 1.0)
         f = (f.astype(np.float32) * (1.0 - mask) + blurred.astype(np.float32) * mask).astype(np.uint8)
