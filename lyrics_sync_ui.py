@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import math
 import os
 import re
 import shutil
@@ -355,23 +356,51 @@ FX_LOOK_PRESETS = {
 }
 
 
+def _builtin_presets() -> dict:
+    """Presets that ship with the app: always present, never editable or deletable."""
+    presets = {name: _normalise_preset(p) for name, p in _default_style_presets().items()}
+    for name, overrides in FX_LOOK_PRESETS.items():
+        presets[name] = {"style": None, "aesthetics": AestheticConfig.from_dict(overrides).to_dict()}
+    return presets
+
+
+def _read_user_presets() -> dict:
+    """The presets saved by the user (built-in names in an old file are ignored)."""
+    if not PRESETS_FILE.exists():
+        return {}
+    try:
+        stored = json.loads(PRESETS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(stored, dict):
+        return {}
+    builtin = _builtin_presets()
+    return {name: _normalise_preset(p) for name, p in stored.items() if name not in builtin}
+
+
+def _write_json_atomic(path: Path, data) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _all_presets() -> dict:
+    presets = {name: {**p, "builtin": True} for name, p in _builtin_presets().items()}
+    presets.update({name: {**p, "builtin": False} for name, p in _read_user_presets().items()})
+    return presets
+
+
+def _clean_preset_name(name: str) -> str:
+    name = (name or "").strip()
+    if not name or len(name) > 80:
+        raise HTTPException(status_code=400, detail="Preset name must be 1-80 characters")
+    return name
+
+
 @app.get("/api/presets")
 def get_presets():
-    stored = None
-    if PRESETS_FILE.exists():
-        try:
-            stored = json.loads(PRESETS_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            stored = None
-    if isinstance(stored, dict):
-        presets = {name: _normalise_preset(p) for name, p in stored.items()}
-    else:
-        presets = {name: _normalise_preset(p) for name, p in _default_style_presets().items()}
-    for name, overrides in FX_LOOK_PRESETS.items():
-        presets.setdefault(
-            name, {"style": None, "aesthetics": AestheticConfig.from_dict(overrides).to_dict()}
-        )
-    return presets
+    return _all_presets()
 
 
 def _default_style_presets() -> dict:
@@ -432,12 +461,82 @@ def _default_style_presets() -> dict:
 
 @app.post("/api/presets/{preset_name}")
 def save_preset(preset_name: str, data: dict = Body(...)):
-    """Save ``{"style": {...}, "aesthetics": {...}}`` (a bare style dict is still accepted)."""
-    presets = get_presets()
-    presets[preset_name] = _normalise_preset(data)
-    PRESETS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    PRESETS_FILE.write_text(json.dumps(presets, indent=2), encoding="utf-8")
-    return {"status": "ok", "presets": presets}
+    """Save ``{"style": {...}, "aesthetics": {...}}`` (a bare style dict is still accepted).
+    Saving under an existing user preset's name overwrites it; built-in names are protected."""
+    name = _clean_preset_name(preset_name)
+    if name in _builtin_presets():
+        raise HTTPException(status_code=400, detail="That is a built-in preset; choose another name")
+    user = _read_user_presets()
+    user[name] = _normalise_preset(data)
+    _write_json_atomic(PRESETS_FILE, user)
+    return {"status": "ok", "presets": _all_presets()}
+
+
+@app.delete("/api/presets/{preset_name}")
+def delete_preset(preset_name: str):
+    if preset_name in _builtin_presets():
+        raise HTTPException(status_code=400, detail="Built-in presets cannot be deleted")
+    user = _read_user_presets()
+    if preset_name not in user:
+        raise HTTPException(status_code=404, detail="Preset not found")
+    del user[preset_name]
+    _write_json_atomic(PRESETS_FILE, user)
+    return {"status": "ok", "presets": _all_presets()}
+
+
+@app.post("/api/presets/{preset_name}/rename")
+def rename_preset(preset_name: str, data: dict = Body(...)):
+    new_name = _clean_preset_name(data.get("new_name", ""))
+    builtin = _builtin_presets()
+    if preset_name in builtin or new_name in builtin:
+        raise HTTPException(status_code=400, detail="Built-in presets cannot be renamed or replaced")
+    user = _read_user_presets()
+    if preset_name not in user:
+        raise HTTPException(status_code=404, detail="Preset not found")
+    if new_name != preset_name and new_name in user:
+        raise HTTPException(status_code=409, detail="A preset with that name already exists")
+    # keep the list order: rebuild with the new key in the old slot
+    user = {(new_name if k == preset_name else k): v for k, v in user.items()}
+    _write_json_atomic(PRESETS_FILE, user)
+    return {"status": "ok", "presets": _all_presets()}
+
+
+# Per-song settings that are not part of a look (currently the global subtitle offset).
+def _song_settings_file() -> Path:
+    return PRESETS_FILE.parent / "song_settings.json"
+
+
+def _read_song_settings() -> dict:
+    try:
+        data = json.loads(_song_settings_file().read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+@app.get("/api/song-settings/{song_name}")
+def get_song_settings(song_name: str):
+    entry = _read_song_settings().get(song_name)
+    offset = entry.get("time_offset", 0.0) if isinstance(entry, dict) else 0.0
+    return {"time_offset": offset if isinstance(offset, (int, float)) else 0.0}
+
+
+@app.put("/api/song-settings/{song_name}")
+def put_song_settings(song_name: str, data: dict = Body(...)):
+    try:
+        offset = float(data.get("time_offset", 0.0))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="time_offset must be a number")
+    if not math.isfinite(offset):
+        raise HTTPException(status_code=400, detail="time_offset must be a number")
+    offset = round(max(-5.0, min(5.0, offset)), 2)
+    settings = _read_song_settings()
+    if offset:
+        settings[song_name] = {"time_offset": offset}
+    else:
+        settings.pop(song_name, None)
+    _write_json_atomic(_song_settings_file(), settings)
+    return {"time_offset": offset}
 
 
 class Job:

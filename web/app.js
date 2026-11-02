@@ -74,6 +74,8 @@ const lineCount = document.getElementById("lineCount");
 // Typography & Layout elements
 const presetSelect = document.getElementById("presetSelect");
 const btnSavePreset = document.getElementById("btnSavePreset");
+const btnRenamePreset = document.getElementById("btnRenamePreset");
+const btnDeletePreset = document.getElementById("btnDeletePreset");
 const fontInput = document.getElementById("fontInput");
 const fontsList = document.getElementById("fontsList");
 const fontSize = document.getElementById("fontSize");
@@ -177,24 +179,48 @@ function windowHasLyrics(start, duration) {
 const lyricOffset = () => Number(styleState.time_offset) || 0;
 const offsetKey = (song) => `ct.offset:${song}`;
 
+let offsetSaveTimer = null;
+
 function setTimeOffset(value, { persist = true } = {}) {
   const v = Math.max(-5, Math.min(5, Math.round((Number(value) || 0) * 100) / 100));
   styleState.time_offset = v;
   timeOffset.value = v;
   timeOffsetVal.textContent = (v > 0 ? "+" : "") + v.toFixed(2);
   if (persist && currentSong) {
-    try {
-      if (v) localStorage.setItem(offsetKey(currentSong), String(v));
-      else localStorage.removeItem(offsetKey(currentSong));
-    } catch (_) { /* storage can be unavailable; the offset just isn't remembered */ }
+    // Saved on the server (.lyrics_sync/song_settings.json), debounced while the slider drags.
+    const song = currentSong;
+    clearTimeout(offsetSaveTimer);
+    offsetSaveTimer = setTimeout(() => {
+      fetch(`/api/song-settings/${encodeURIComponent(song)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ time_offset: v }),
+      }).catch(() => { /* offline: the value still applies for this session */ });
+    }, 300);
   }
   updateOverlay();
 }
 
-function restoreSongOffset(song) {
+async function restoreSongOffset(song) {
+  setTimeOffset(0, { persist: false });
   let saved = 0;
-  try { saved = Number(localStorage.getItem(offsetKey(song))) || 0; } catch (_) { /* ignore */ }
-  setTimeOffset(saved, { persist: false });
+  try {
+    const res = await fetch(`/api/song-settings/${encodeURIComponent(song)}`);
+    if (res.ok) saved = Number((await res.json()).time_offset) || 0;
+  } catch (_) { /* ignore */ }
+  // One-time move of offsets that older versions kept in this browser.
+  if (!saved) {
+    try {
+      const legacy = Number(localStorage.getItem(offsetKey(song))) || 0;
+      if (legacy) {
+        saved = legacy;
+        localStorage.removeItem(offsetKey(song));
+        if (song === currentSong) setTimeOffset(legacy); // persists it to the server
+        return;
+      }
+    } catch (_) { /* ignore */ }
+  }
+  if (song === currentSong) setTimeOffset(saved, { persist: false });
 }
 
 // Initialize app
@@ -276,20 +302,55 @@ async function loadFonts() {
   }
 }
 
-async function loadPresets() {
+async function loadPresets(selectName) {
   try {
     const res = await fetch("/api/presets");
     presets = await res.json();
+    const previous = selectName ?? presetSelect.value;
     presetSelect.innerHTML = "";
-    Object.keys(presets).forEach((name) => {
-      const opt = document.createElement("option");
-      opt.value = name;
-      opt.textContent = name;
-      presetSelect.appendChild(opt);
+    const groups = [
+      ["Built-in", Object.keys(presets).filter((n) => presets[n].builtin)],
+      ["My presets", Object.keys(presets).filter((n) => !presets[n].builtin)],
+    ];
+    groups.forEach(([label, names]) => {
+      if (!names.length) return;
+      const group = document.createElement("optgroup");
+      group.label = label;
+      names.forEach((name) => {
+        const opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name;
+        group.appendChild(opt);
+      });
+      presetSelect.appendChild(group);
     });
+    if (previous && presets[previous]) presetSelect.value = previous;
+    updatePresetButtons();
   } catch (err) {
     console.warn("Failed to load presets:", err);
   }
+}
+
+// Rename/Delete only make sense for presets the user saved, not the built-in ones.
+function updatePresetButtons() {
+  const p = presets[presetSelect.value];
+  const editable = !!p && !p.builtin;
+  btnRenamePreset.disabled = !editable;
+  btnDeletePreset.disabled = !editable;
+}
+
+async function presetRequest(url, method, body) {
+  const res = await fetch(url, {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    alert(err.detail || `Request failed (${res.status})`);
+    return false;
+  }
+  return true;
 }
 
 async function loadSongs() {
@@ -326,7 +387,7 @@ async function selectSong(songName) {
     dirtySong = null;
   }
   currentSong = songName;
-  restoreSongOffset(songName);
+  restoreSongOffset(songName); // async; applies the saved offset when it arrives
   setSaveStatus("");
   songStatusBadge.textContent = "Loading...";
   songStatusBadge.className = "status-badge";
@@ -1240,6 +1301,7 @@ function setupEventListeners() {
   // Presets load/save
   presetSelect.addEventListener("change", (e) => {
     const p = presets[e.target.value];
+    updatePresetButtons();
     if (!p) return;
     // A preset holds a caption style, FX settings, or both; apply whichever it has.
     if (p.style) applyStyle(p.style);
@@ -1247,18 +1309,41 @@ function setupEventListeners() {
   });
 
   btnSavePreset.addEventListener("click", async () => {
-    const name = prompt("Name this preset (saves caption style + FX settings):", "My Custom Style");
+    const current = presets[presetSelect.value];
+    // Defaulting to the selected user preset's name makes "Save As" double as "update this preset".
+    const suggestion = current && !current.builtin ? presetSelect.value : "My Custom Style";
+    const name = (prompt("Name this preset (saves caption style + FX settings):", suggestion) || "").trim();
     if (!name) return;
-    await fetch(`/api/presets/${encodeURIComponent(name)}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        style: Object.fromEntries(Object.entries(styleState).filter(([k]) => k !== "time_offset")),
-        aesthetics: aestheticState,
-      }),
+    if (presets[name]?.builtin) {
+      return alert(`"${name}" is a built-in preset and can't be changed. Pick another name.`);
+    }
+    if (presets[name] && !confirm(`A preset named "${name}" already exists. Replace it with the current settings?`)) {
+      return;
+    }
+    const ok = await presetRequest(`/api/presets/${encodeURIComponent(name)}`, "POST", {
+      style: Object.fromEntries(Object.entries(styleState).filter(([k]) => k !== "time_offset")),
+      aesthetics: aestheticState,
     });
-    await loadPresets();
-    presetSelect.value = name;
+    if (ok) await loadPresets(name);
+  });
+
+  btnRenamePreset.addEventListener("click", async () => {
+    const old = presetSelect.value;
+    if (!presets[old] || presets[old].builtin) return;
+    const name = (prompt(`Rename "${old}" to:`, old) || "").trim();
+    if (!name || name === old) return;
+    if (await presetRequest(`/api/presets/${encodeURIComponent(old)}/rename`, "POST", { new_name: name })) {
+      await loadPresets(name);
+    }
+  });
+
+  btnDeletePreset.addEventListener("click", async () => {
+    const name = presetSelect.value;
+    if (!presets[name] || presets[name].builtin) return;
+    if (!confirm(`Delete the preset "${name}"? This can't be undone.`)) return;
+    if (await presetRequest(`/api/presets/${encodeURIComponent(name)}`, "DELETE")) {
+      await loadPresets(Object.keys(presets).find((n) => n !== name));
+    }
   });
 
   // Job Triggers

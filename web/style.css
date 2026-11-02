@@ -837,3 +837,8 @@ body {
 .offset-row { display: flex; gap: 6px; margin-top: 8px; }
 .offset-row .btn-secondary { flex: 1; width: auto; }
 .fine-print { margin: 8px 0 0; font-size: 11px; line-height: 1.4; color: var(--text-muted); }
+
+/* Preset management buttons */
+.title-actions { display: inline-flex; gap: 6px; }
+.btn-tiny:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-tiny.danger:not(:disabled):hover { color: var(--accent-danger); border-color: var(--accent-danger); }

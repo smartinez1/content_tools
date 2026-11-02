@@ -87,7 +87,11 @@
       <div class="panel-section">
         <div class="section-title">
           <span>Preset</span>
-          <button id="btnSavePreset" class="btn-tiny">+ Save As</button>
+          <span class="title-actions">
+            <button id="btnRenamePreset" class="btn-tiny" disabled title="Rename the selected preset">Rename</button>
+            <button id="btnDeletePreset" class="btn-tiny danger" disabled title="Delete the selected preset">Delete</button>
+            <button id="btnSavePreset" class="btn-tiny" title="Save the current caption style + FX under a name">+ Save As</button>
+          </span>
         </div>
         <select id="presetSelect" class="full-width-select"></select>
       </div>
@@ -209,7 +213,7 @@
           <button type="button" id="offsetPlus" class="btn-secondary">+0.1s</button>
           <button type="button" id="offsetReset" class="btn-secondary">Reset</button>
         </div>
-        <p class="fine-print">Moves every caption earlier (&minus;) or later (+) in the player and in previews/renders. The lyric line times above are not changed. Remembered per song.</p>
+        <p class="fine-print">Moves every caption earlier (&minus;) or later (+) in the player and in previews/renders. The lyric line times above are not changed. Saved per song on the server.</p>
       </div>
 
       <!-- Effects & Motion -->
