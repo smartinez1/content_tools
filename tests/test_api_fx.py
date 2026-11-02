@@ -75,6 +75,71 @@ class TestPresets(unittest.TestCase):
         self.assertEqual(old["style"]["font_size"], 40)
         self.assertIsNone(old["aesthetics"])
 
+    def test_builtins_are_flagged_and_protected(self):
+        presets = self.client.get("/api/presets").json()
+        self.assertTrue(presets["Narrow Blocky Column"]["builtin"])
+        self.assertTrue(presets["FX · Subtle"]["builtin"])
+        body = {"style": {"font_size": 50}}
+        self.assertEqual(self.client.post("/api/presets/FX · Subtle", json=body).status_code, 400)
+        self.assertEqual(self.client.delete("/api/presets/Narrow Blocky Column").status_code, 400)
+        self.assertEqual(self.client.post("/api/presets/mine", json=body).status_code, 200)
+        self.assertFalse(self.client.get("/api/presets").json()["mine"]["builtin"])
+        self.assertEqual(
+            self.client.post("/api/presets/mine/rename", json={"new_name": "FX · Subtle"}).status_code, 400
+        )
+        # only user presets are written to disk
+        stored = json.loads(lyrics_sync_ui.PRESETS_FILE.read_text(encoding="utf-8"))
+        self.assertEqual(list(stored), ["mine"])
+
+    def test_old_file_copies_of_builtins_are_ignored(self):
+        path = lyrics_sync_ui.PRESETS_FILE
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({
+            "Narrow Blocky Column": {"style": {"font_size": 99}, "aesthetics": None},
+            "keep": {"style": {"font_size": 41}, "aesthetics": None},
+        }), encoding="utf-8")
+        presets = self.client.get("/api/presets").json()
+        self.assertNotEqual(presets["Narrow Blocky Column"]["style"]["font_size"], 99)
+        self.assertEqual(presets["keep"]["style"]["font_size"], 41)
+
+    def test_overwrite_delete_and_rename(self):
+        post = lambda name, size: self.client.post(f"/api/presets/{name}", json={"style": {"font_size": size}})  # noqa: E731
+        post("a", 40)
+        post("b", 42)
+        post("a", 55)  # overwrite keeps one entry
+        user = {n: p for n, p in self.client.get("/api/presets").json().items() if not p["builtin"]}
+        self.assertEqual(list(user), ["a", "b"])
+        self.assertEqual(user["a"]["style"]["font_size"], 55)
+
+        res = self.client.post("/api/presets/a/rename", json={"new_name": "  renamed "})
+        self.assertEqual(res.status_code, 200, res.text)
+        names = [n for n, p in res.json()["presets"].items() if not p["builtin"]]
+        self.assertEqual(names, ["renamed", "b"])  # order kept
+        self.assertEqual(res.json()["presets"]["renamed"]["style"]["font_size"], 55)
+        self.assertEqual(self.client.post("/api/presets/renamed/rename", json={"new_name": "b"}).status_code, 409)
+        self.assertEqual(self.client.post("/api/presets/ghost/rename", json={"new_name": "x"}).status_code, 404)
+        self.assertEqual(self.client.post("/api/presets/b/rename", json={"new_name": "  "}).status_code, 400)
+
+        self.assertEqual(self.client.delete("/api/presets/renamed").status_code, 200)
+        self.assertEqual(self.client.delete("/api/presets/renamed").status_code, 404)
+        self.assertNotIn("renamed", self.client.get("/api/presets").json())
+
+    def test_blank_or_huge_names_rejected(self):
+        self.assertEqual(self.client.post("/api/presets/%20", json={"style": {}}).status_code, 400)
+        self.assertEqual(self.client.post("/api/presets/" + "x" * 81, json={"style": {}}).status_code, 400)
+
+    def test_song_offset_is_saved_per_song_and_clamped(self):
+        url = "/api/song-settings/my song"
+        self.assertEqual(self.client.get(url).json(), {"time_offset": 0.0})
+        self.assertEqual(self.client.put(url, json={"time_offset": 1.234}).json(), {"time_offset": 1.23})
+        self.assertEqual(self.client.get(url).json(), {"time_offset": 1.23})
+        self.assertEqual(self.client.get("/api/song-settings/other").json(), {"time_offset": 0.0})
+        self.assertEqual(self.client.put(url, json={"time_offset": 99}).json(), {"time_offset": 5.0})
+        self.assertEqual(self.client.put(url, json={"time_offset": "x"}).status_code, 400)
+        self.client.put(url, json={"time_offset": 0})
+        stored = json.loads((lyrics_sync_ui.PRESETS_FILE.parent / "song_settings.json").read_text())
+        self.assertEqual(stored, {})  # zero removes the entry
+
     def test_legacy_flat_body_is_accepted(self):
         self.assertEqual(self.client.post("/api/presets/flat", json={"font_size": 44}).status_code, 200)
         flat = self.client.get("/api/presets").json()["flat"]
