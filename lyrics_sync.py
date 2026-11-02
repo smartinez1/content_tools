@@ -28,7 +28,6 @@ Examples:
 """
 
 import argparse
-from dataclasses import asdict, dataclass
 import difflib
 import json
 import os
@@ -38,6 +37,7 @@ import subprocess
 import sys
 import tempfile
 import unicodedata
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 PROJECT_ROOT = Path(os.environ.get("LYRICS_PROJECT_ROOT", Path(__file__).resolve().parent.parent))
@@ -251,6 +251,118 @@ def group_words_by_line(result, lines: list[str]):
         )
         index += count
     return grouped
+
+
+MIN_LINE_SECONDS = 0.1
+
+
+def _distribute_words(tokens: list[str], start: float, end: float) -> list[dict]:
+    """Spread tokens contiguously over [start, end], weighted by character length."""
+    weights = [max(len(t), 1) for t in tokens]
+    total = float(sum(weights))
+    span = end - start
+    words = []
+    cursor = start
+    for i, (tok, weight) in enumerate(zip(tokens, weights)):
+        word_end = end if i == len(tokens) - 1 else cursor + span * weight / total
+        words.append({"text": tok, "start": round(cursor, 3), "end": round(word_end, 3)})
+        cursor = word_end
+    return words
+
+
+def _clean_words(raw) -> list[dict]:
+    """Keep only well-formed words ({text,start,end} with numeric times)."""
+    cleaned = []
+    for w in raw if isinstance(raw, list) else []:
+        try:
+            text = str(w["text"]).strip()
+            start, end = float(w["start"]), float(w["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if text:
+            cleaned.append({"text": text, "start": start, "end": max(end, start)})
+    return cleaned
+
+
+def normalise_timings(segments) -> list[dict]:
+    """Validate and repair user-edited line timings.
+
+    Input/output schema matches the alignment cache: a list of
+    ``{"text", "start", "end", "words": [{"text", "start", "end"}]}``.
+
+    - lines with empty text are dropped; text whitespace is collapsed;
+    - lines are sorted by start, each line is at least MIN_LINE_SECONDS long, its end is
+      clamped to the next line's start, and any remaining overlap is resolved by pushing
+      later lines forward;
+    - karaoke words follow the (possibly edited) text: unchanged word count keeps the word
+      timings (rescaled if the line window moved), a different count redistributes the
+      words evenly (by length) across the line window.
+
+    Raises ValueError for malformed input.
+    """
+    if not isinstance(segments, list):
+        raise ValueError("timings must be a list of line objects")
+
+    lines = []
+    for i, seg in enumerate(segments):
+        if not isinstance(seg, dict):
+            raise ValueError(f"line {i + 1}: expected an object")
+        try:
+            start, end = float(seg["start"]), float(seg["end"])
+        except (KeyError, TypeError, ValueError):
+            raise ValueError(f"line {i + 1}: start and end must be numbers") from None
+        if start != start or end != end or abs(start) == float("inf") or abs(end) == float("inf"):
+            raise ValueError(f"line {i + 1}: start and end must be finite")
+        text = " ".join(str(seg.get("text", "")).split())
+        if not text:
+            continue
+        lines.append({"text": text, "start": max(0.0, start), "end": end,
+                      "words": _clean_words(seg.get("words"))})
+
+    lines.sort(key=lambda line: (line["start"], line["end"]))
+
+    # Pass 1: minimum length, end clamped to the next line's start.
+    for i, line in enumerate(lines):
+        line["end"] = max(line["end"], line["start"] + MIN_LINE_SECONDS)
+        if i + 1 < len(lines) and line["end"] > lines[i + 1]["start"]:
+            line["end"] = max(lines[i + 1]["start"], line["start"] + MIN_LINE_SECONDS)
+    # Pass 2: resolve remaining overlap (lines closer than MIN_LINE_SECONDS) by pushing forward.
+    prev_end = 0.0
+    for line in lines:
+        if line["start"] < prev_end:
+            line["start"] = prev_end
+        line["end"] = max(line["end"], line["start"] + MIN_LINE_SECONDS)
+        prev_end = line["end"]
+
+    for line in lines:
+        start, end = line["start"], line["end"]
+        tokens = line["text"].split()
+        old = line["words"]
+        if len(old) == len(tokens):
+            old_start, old_end = old[0]["start"], max(w["end"] for w in old)
+            if old_end - old_start > 1e-6:
+                scale = (end - start) / (old_end - old_start)
+                words = [
+                    {
+                        "text": tok,
+                        "start": round(start + (w["start"] - old_start) * scale, 3),
+                        "end": round(start + (w["end"] - old_start) * scale, 3),
+                    }
+                    for tok, w in zip(tokens, old)
+                ]
+            else:
+                words = _distribute_words(tokens, start, end)
+        else:
+            words = _distribute_words(tokens, start, end)
+        # Final guard: words stay inside the line and never run backwards.
+        cursor = start
+        for w in words:
+            w["start"] = min(max(w["start"], cursor), end)
+            w["end"] = min(max(w["end"], w["start"]), end)
+            cursor = w["start"]
+        line["words"] = words
+        line["start"], line["end"] = round(start, 3), round(end, 3)
+    return lines
 
 
 def align_lyrics(audio: Path, lines: list[str], model_size: str, language: str):

@@ -36,20 +36,21 @@ let styleState = {
   letter_spacing: 0,
 };
 
-// Lo-Fi Emo-Trap Aesthetic State (All checked by default)
+// Lo-Fi Emo-Trap Aesthetic State. Defaults and knob ranges come from GET /api/aesthetics
+// (single source of truth in video_fx.py); this minimal object is only the pre-load fallback.
 let aestheticState = {
   enabled: true,
   el_cocuy_wash: true,
   framerate_decimate: true,
-  target_fps: 15,
   iso_noise: true,
-  noise_strength: 0.35,
   chromatic_aberration: true,
   fogged_glass_vignette: true,
   crt_scanlines: true,
   sidechain_pump: true,
   fuzzed_glitch: true,
+  ca_shift_px: 3,
 };
+let fxSchema = null;
 
 // DOM elements
 const songSelect = document.getElementById("songSelect");
@@ -114,14 +115,14 @@ const karaokeTag = document.getElementById("karaokeTag");
 
 // Aesthetic toggles
 const lofiMasterToggle = document.getElementById("lofiMasterToggle");
-const fxElCocuy = document.getElementById("fxElCocuy");
-const fxDecimate = document.getElementById("fxDecimate");
-const fxIsoNoise = document.getElementById("fxIsoNoise");
-const fxChromatic = document.getElementById("fxChromatic");
-const fxFoggedGlass = document.getElementById("fxFoggedGlass");
-const fxScanlines = document.getElementById("fxScanlines");
-const fxSidechain = document.getElementById("fxSidechain");
-const fxGlitch = document.getElementById("fxGlitch");
+const fxControls = document.getElementById("fxControls");
+const btnFxFrame = document.getElementById("btnFxFrame");
+const btnFxResetAll = document.getElementById("btnFxResetAll");
+const fxAutoRefresh = document.getElementById("fxAutoRefresh");
+const fxFramePanel = document.getElementById("fxFramePanel");
+const fxFrameImg = document.getElementById("fxFrameImg");
+const fxFrameStatus = document.getElementById("fxFrameStatus");
+const btnCloseFxFrame = document.getElementById("btnCloseFxFrame");
 
 // Action Buttons
 const btnPreview10s = document.getElementById("btnPreview10s");
@@ -133,18 +134,97 @@ const jobProgressBar = document.getElementById("jobProgressBar");
 const jobMessage = document.getElementById("jobMessage");
 const jobOutputLinks = document.getElementById("jobOutputLinks");
 const btnCancelJob = document.getElementById("btnCancelJob");
+const previewPanel = document.getElementById("previewPanel");
+const previewVideo = document.getElementById("previewVideo");
+const btnClosePreview = document.getElementById("btnClosePreview");
 
 let activeJobId = null;
+const PREVIEW_SECONDS = 10;
+
+// Buttons that start a long job; disabled while one is running.
+const jobButtons = () => [btnRealign, btnPreview10s, btnRenderFull, btnRenderClean];
+function setJobButtonsDisabled(disabled) {
+  jobButtons().forEach((b) => b && (b.disabled = disabled));
+}
+
+// Where the 10s preview should start, always in *source* song time (mainVideo is never
+// swapped for the preview, so its currentTime is the song position).
+function pickPreviewStart() {
+  const t = mainVideo.currentTime;
+  if (Number.isFinite(t) && t > 0.05) return t;
+  // Playhead untouched: begin at the first lyric line so the preview has captions.
+  const first = timings.length ? timings[0].start : 0;
+  return Math.max(0, first - 0.5);
+}
+
+function windowHasLyrics(start, duration) {
+  const end = start + duration;
+  return timings.some((l) => l.end > start && l.start < end);
+}
 
 // Initialize app
 document.addEventListener("DOMContentLoaded", async () => {
   await loadFonts();
+  await initAesthetics();
   await loadPresets();
   await loadSongs();
   setupEventListeners();
+  setupLineEditor();
   setupDragReposition();
+  setupOverlayTracking();
+  setupPanels();
   updateLofiPreviewCSS();
 });
+
+// The caption overlay is positioned in pixels from the video's on-screen box, so it must be
+// recomputed whenever that box changes - not only on playback ticks.
+function setupOverlayTracking() {
+  let queued = false;
+  const refresh = () => {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(() => {
+      queued = false;
+      updateOverlay();
+    });
+  };
+  if (typeof ResizeObserver !== "undefined") {
+    const ro = new ResizeObserver(refresh);
+    ro.observe(mainVideo);
+    ro.observe(videoContainer);
+  }
+  window.addEventListener("resize", refresh);
+  ["loadedmetadata", "loadeddata", "seeked", "emptied"].forEach((ev) =>
+    mainVideo.addEventListener(ev, refresh)
+  );
+}
+
+function closePreviewModal() {
+  previewVideo.pause();
+  previewVideo.removeAttribute("src");
+  previewVideo.load();
+  previewPanel.hidden = true;
+}
+
+function closeFxFramePanel() {
+  fxFrameReq += 1; // ignore any render still in flight
+  if (fxFrameAbort) fxFrameAbort.abort();
+  fxFramePanel.hidden = true;
+}
+
+function setupPanels() {
+  btnClosePreview.addEventListener("click", closePreviewModal);
+  btnCloseFxFrame.addEventListener("click", closeFxFramePanel);
+  // click on the dimmed backdrop (not the dialog) closes the preview
+  previewPanel.addEventListener("click", (e) => {
+    if (e.target === previewPanel) closePreviewModal();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    if (!previewPanel.hidden) closePreviewModal();
+    else if (!fxFramePanel.hidden) closeFxFramePanel();
+  });
+}
 
 async function loadFonts() {
   try {
@@ -202,7 +282,16 @@ async function loadSongs() {
 
 async function selectSong(songName) {
   if (!songName) return;
+  // Persist pending line edits for the song we're leaving.
+  if (currentSong && songName !== currentSong && !(await flushTimings())) {
+    if (!confirm("Your last lyric edits could not be saved. Switch song and discard them?")) {
+      songSelect.value = currentSong;
+      return;
+    }
+    dirtySong = null;
+  }
   currentSong = songName;
+  setSaveStatus("");
   songStatusBadge.textContent = "Loading...";
   songStatusBadge.className = "status-badge";
 
@@ -229,44 +318,495 @@ async function selectSong(songName) {
   }
 }
 
-function renderLineList() {
-  linesList.innerHTML = "";
-  lineCount.textContent = `${timings.length} lines`;
+// ---------------------------------------------------------------------------
+// FX knobs: controls are generated from /api/aesthetics
+// ---------------------------------------------------------------------------
+const fxFieldEls = {}; // field name -> { input, valueEl }
+const fxToggleEls = {}; // toggle field name -> checkbox
+let fxFrameTimer = null;
+let fxFrameReq = 0;
+let fxFrameUrl = null;
+let fxFrameAbort = null;
 
-  timings.forEach((line, index) => {
-    const item = document.createElement("div");
-    item.className = "line-item";
-    item.dataset.index = index;
-    const txt = styleState.lowercase ? line.text.toLowerCase() : line.text;
-    item.innerHTML = `
-      <span class="line-text">${escapeHtml(txt)}</span>
-      <span class="line-time">${formatTime(line.start)}</span>
-    `;
-    item.addEventListener("click", () => {
-      mainVideo.currentTime = Math.max(0, line.start - 0.2);
-      mainVideo.play();
+async function initAesthetics() {
+  try {
+    const res = await fetch("/api/aesthetics");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    fxSchema = await res.json();
+  } catch (err) {
+    console.warn("Failed to load FX schema:", err);
+    fxControls.innerHTML = '<div class="placeholder-msg">Could not load effect settings.</div>';
+    return;
+  }
+  aestheticState = { ...fxSchema.defaults };
+  buildFxControls();
+  syncFxControls();
+}
+
+function fxDecimals(step) {
+  const str = String(step);
+  return str.includes(".") ? str.split(".")[1].length : 0;
+}
+
+function fxFormat(name, value) {
+  return Number(value).toFixed(fxDecimals(fxSchema.fields[name].step));
+}
+
+function buildFxControls() {
+  fxControls.innerHTML = "";
+  fxSchema.groups.forEach((group) => {
+    const names = Object.keys(fxSchema.fields).filter(
+      (n) => fxSchema.fields[n].group === group.id && fxSchema.fields[n].ui
+    );
+    const card = document.createElement("section");
+    card.className = "fx-card";
+    card.innerHTML = `
+      <header class="fx-card-head">
+        ${group.toggle ? '<input type="checkbox" class="fx-toggle" aria-label="Enable">' : ""}
+        <button type="button" class="fx-expand" aria-expanded="false">
+          <span class="fx-title"></span><span class="fx-hint"></span>
+        </button>
+        <button type="button" class="mini fx-reset" title="Reset this effect to its defaults">↺</button>
+      </header>
+      <div class="fx-card-body" hidden></div>`;
+    card.querySelector(".fx-title").textContent = group.label;
+    card.querySelector(".fx-hint").textContent = group.hint || "";
+    const body = card.querySelector(".fx-card-body");
+
+    if (group.toggle) {
+      const box = card.querySelector(".fx-toggle");
+      fxToggleEls[group.toggle] = box;
+      box.addEventListener("change", () => {
+        aestheticState[group.toggle] = box.checked;
+        updateLofiPreviewCSS();
+        scheduleFxFrame();
+      });
+    }
+    const expand = card.querySelector(".fx-expand");
+    expand.addEventListener("click", () => {
+      body.hidden = !body.hidden;
+      expand.setAttribute("aria-expanded", String(!body.hidden));
+      card.classList.toggle("open", !body.hidden);
     });
-    linesList.appendChild(item);
+    card.querySelector(".fx-reset").addEventListener("click", () => {
+      if (group.toggle) aestheticState[group.toggle] = fxSchema.defaults[group.toggle];
+      names.forEach((n) => (aestheticState[n] = fxSchema.defaults[n]));
+      syncFxControls();
+      updateLofiPreviewCSS();
+      scheduleFxFrame();
+    });
+
+    names.forEach((name) => {
+      const spec = fxSchema.fields[name];
+      const row = document.createElement("div");
+      row.className = "fx-row";
+      if (spec.hint) row.title = spec.hint;
+      row.innerHTML = '<label><span class="fx-label"></span> <span class="fx-val"></span></label>' +
+        '<input type="range">';
+      row.querySelector(".fx-label").textContent = spec.label;
+      const input = row.querySelector("input");
+      input.min = spec.min;
+      input.max = spec.max;
+      input.step = spec.step;
+      const valueEl = row.querySelector(".fx-val");
+      fxFieldEls[name] = { input, valueEl };
+      input.addEventListener("input", () => {
+        const v = spec.kind === "int" ? Math.round(Number(input.value)) : Number(input.value);
+        aestheticState[name] = v;
+        valueEl.textContent = fxFormat(name, v);
+        updateLofiPreviewCSS();
+      });
+      input.addEventListener("change", scheduleFxFrame); // on release, not while dragging
+      body.appendChild(row);
+    });
+    fxControls.appendChild(card);
   });
 }
 
-function updateLofiPreviewCSS() {
-  const lofiActive = aestheticState.enabled;
-  if (lofiScanlinesLayer) {
-    lofiScanlinesLayer.classList.toggle("active", lofiActive && aestheticState.crt_scanlines);
+// Push aestheticState into every control.
+function syncFxControls() {
+  lofiMasterToggle.checked = !!aestheticState.enabled;
+  Object.entries(fxToggleEls).forEach(([name, box]) => (box.checked = !!aestheticState[name]));
+  Object.entries(fxFieldEls).forEach(([name, { input, valueEl }]) => {
+    const v = aestheticState[name];
+    input.value = v;
+    valueEl.textContent = fxFormat(name, v);
+  });
+}
+
+function applyAesthetics(fx) {
+  aestheticState = { ...(fxSchema ? fxSchema.defaults : {}), ...fx };
+  syncFxControls();
+  updateLofiPreviewCSS();
+  scheduleFxFrame();
+}
+
+function scheduleFxFrame() {
+  if (!fxAutoRefresh.checked || !currentSong) return;
+  clearTimeout(fxFrameTimer);
+  fxFrameTimer = setTimeout(renderFxFrame, 350);
+}
+
+// One frame at the playhead through the real effect stack (~1s instead of a full preview render).
+async function renderFxFrame() {
+  if (!currentSong) return alert("Select a song first.");
+  const mine = ++fxFrameReq;
+  if (fxFrameAbort) fxFrameAbort.abort(); // a newer knob position makes the in-flight one pointless
+  fxFrameAbort = new AbortController();
+  const t = mainVideo.currentTime > 0.05 ? mainVideo.currentTime : (timings[0]?.start ?? 0) + 1;
+  fxFramePanel.hidden = false;
+  fxFrameStatus.textContent = "rendering...";
+  try {
+    const res = await fetch("/api/fx-frame", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ song_name: currentSong, time_sec: t, aesthetics: aestheticState }),
+      signal: fxFrameAbort.signal,
+    });
+    if (mine !== fxFrameReq) return; // a newer request superseded this one
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${res.status}`);
+    }
+    const blob = await res.blob();
+    if (mine !== fxFrameReq) return;
+    if (fxFrameUrl) URL.revokeObjectURL(fxFrameUrl);
+    fxFrameUrl = URL.createObjectURL(blob);
+    fxFrameImg.src = fxFrameUrl;
+    fxFrameStatus.textContent = `at ${t.toFixed(1)}s`;
+  } catch (err) {
+    if (err.name === "AbortError") return; // superseded on purpose
+    if (mine === fxFrameReq) fxFrameStatus.textContent = `failed: ${err.message}`;
   }
-  if (lofiFogLayer) {
-    lofiFogLayer.classList.toggle("active", lofiActive && aestheticState.fogged_glass_vignette);
+}
+
+// ---------------------------------------------------------------------------
+// Lyric line editor (text / start / end), auto-saved to PUT /api/timings/{song}
+// ---------------------------------------------------------------------------
+const NUDGE_SECONDS = 0.05;
+const saveStatusEl = document.getElementById("saveStatus");
+let saveTimer = null;
+let saveInFlight = null;
+let dirtySong = null; // song whose edits are not yet confirmed by the server
+let editCounter = 0; // bumped on every edit; lets a late save response detect newer edits
+let pendingRender = false; // a re-render was deferred because an input had focus
+let focusAfterRender = null;
+
+const round2 = (n) => Math.round(n * 100) / 100;
+
+function setSaveStatus(text, cls = "") {
+  if (!saveStatusEl) return;
+  saveStatusEl.textContent = text;
+  saveStatusEl.className = `save-status ${cls}`.trim();
+}
+
+function markDirty() {
+  dirtySong = currentSong;
+  editCounter += 1;
+  setSaveStatus("Unsaved changes…", "pending");
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveTimings, 600);
+}
+
+// Resolves true when every edit has been persisted (or there was nothing to save).
+async function saveTimings() {
+  clearTimeout(saveTimer);
+  saveTimer = null;
+  while (saveInFlight) await saveInFlight; // serialise saves
+  if (!dirtySong) return true;
+
+  const song = dirtySong;
+  const sentAt = editCounter;
+  dirtySong = null;
+  setSaveStatus("Saving…", "pending");
+  saveInFlight = (async () => {
+    try {
+      const res = await fetch(`/api/timings/${encodeURIComponent(song)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ timings }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+      // Adopt the server's normalised lines only if nothing was edited meanwhile.
+      if (song === currentSong && editCounter === sentAt && !dirtySong) {
+        applyServerTimings(data.timings);
+      }
+      if (!dirtySong) setSaveStatus("Saved", "ok");
+    } catch (err) {
+      dirtySong = song; // keep it dirty so the next edit / action retries
+      setSaveStatus(`Save failed: ${err.message}`, "error");
+    }
+  })();
+  try {
+    await saveInFlight;
+  } finally {
+    saveInFlight = null;
   }
-  if (mainVideo) {
-    mainVideo.classList.toggle("lofi-wash-active", lofiActive && aestheticState.el_cocuy_wash);
+  return !dirtySong;
+}
+
+// Make sure the server has our edits before something reads them from disk.
+async function flushTimings() {
+  if (!dirtySong && !saveInFlight) return true;
+  return saveTimings();
+}
+
+function applyServerTimings(serverTimings) {
+  timings = serverTimings;
+  if (linesList.contains(document.activeElement)) {
+    if (linesList.querySelectorAll(".line-item").length === timings.length) syncRowValues();
+    else pendingRender = true;
+  } else {
+    renderLineList();
   }
   updateOverlay();
+}
+
+function syncRowValues() {
+  linesList.querySelectorAll(".line-item").forEach((row, i) => {
+    const line = timings[i];
+    if (!line) return;
+    const set = (sel, value, keepIfFocused) => {
+      const el = row.querySelector(sel);
+      if (el && !(keepIfFocused && el === document.activeElement)) el.value = value;
+    };
+    // Never rewrite the text box being typed in; time fields have already committed
+    // (on change), so show the server's clamped values even if still focused.
+    set(".line-text-input", line.text, true);
+    set(".line-start", line.start.toFixed(2), false);
+    set(".line-end", line.end.toFixed(2), false);
+  });
+}
+
+function buildLineRow(line, index) {
+  const item = document.createElement("div");
+  item.className = "line-item";
+  item.dataset.index = index;
+  item.innerHTML = `
+    <div class="line-row-top">
+      <button class="mini" data-action="play" title="Play from this line">▶</button>
+      <input class="line-text-input" type="text" spellcheck="false" aria-label="Line text">
+    </div>
+    <div class="line-row-times">
+      <span class="time-group" title="Start (seconds)">
+        <button class="mini" data-action="start-" title="Start -${NUDGE_SECONDS}s">−</button>
+        <input class="line-start" type="number" step="0.01" min="0" aria-label="Start seconds">
+        <button class="mini" data-action="start+" title="Start +${NUDGE_SECONDS}s">+</button>
+        <button class="mini" data-action="start-now" title="Set start to playhead">⌖</button>
+      </span>
+      <span class="time-group" title="End (seconds)">
+        <button class="mini" data-action="end-" title="End -${NUDGE_SECONDS}s">−</button>
+        <input class="line-end" type="number" step="0.01" min="0" aria-label="End seconds">
+        <button class="mini" data-action="end+" title="End +${NUDGE_SECONDS}s">+</button>
+        <button class="mini" data-action="end-now" title="Set end to playhead">⌖</button>
+      </span>
+      <span class="time-group row-actions">
+        <button class="mini" data-action="add" title="Add a line after this one">＋</button>
+        <button class="mini danger" data-action="delete" title="Delete this line">🗑</button>
+      </span>
+    </div>`;
+  item.querySelector(".line-text-input").value = line.text;
+  item.querySelector(".line-start").value = line.start.toFixed(2);
+  item.querySelector(".line-end").value = line.end.toFixed(2);
+  return item;
+}
+
+function renderLineList() {
+  pendingRender = false;
+  linesList.innerHTML = "";
+  lineCount.textContent = `${timings.length} lines`;
+  timings.forEach((line, index) => linesList.appendChild(buildLineRow(line, index)));
+  if (focusAfterRender !== null) {
+    const input = linesList.querySelector(`.line-item[data-index="${focusAfterRender}"] .line-text-input`);
+    focusAfterRender = null;
+    if (input) {
+      input.focus();
+      input.select();
+    }
+  }
+}
+
+function setLineTime(index, field, value) {
+  const line = timings[index];
+  if (!line || !Number.isFinite(value)) return;
+  line[field] = Math.max(0, round2(value));
+  const row = linesList.querySelector(`.line-item[data-index="${index}"]`);
+  const input = row && row.querySelector(field === "start" ? ".line-start" : ".line-end");
+  if (input) input.value = line[field].toFixed(2);
+  markDirty();
+  updateOverlay();
+}
+
+function setupLineEditor() {
+  linesList.addEventListener("input", (e) => {
+    if (!e.target.classList.contains("line-text-input")) return;
+    const index = Number(e.target.closest(".line-item").dataset.index);
+    timings[index].text = e.target.value;
+    markDirty();
+  });
+
+  linesList.addEventListener("change", (e) => {
+    const index = Number(e.target.closest(".line-item")?.dataset.index);
+    if (e.target.classList.contains("line-start")) {
+      const v = parseFloat(e.target.value);
+      if (Number.isFinite(v)) setLineTime(index, "start", v);
+      else e.target.value = timings[index].start.toFixed(2);
+    } else if (e.target.classList.contains("line-end")) {
+      const v = parseFloat(e.target.value);
+      if (Number.isFinite(v)) setLineTime(index, "end", v);
+      else e.target.value = timings[index].end.toFixed(2);
+    }
+  });
+
+  linesList.addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-action]");
+    if (!btn) return;
+    const index = Number(btn.closest(".line-item").dataset.index);
+    const line = timings[index];
+    const now = mainVideo.currentTime || 0;
+    switch (btn.dataset.action) {
+      case "play":
+        mainVideo.currentTime = Math.max(0, line.start - 0.2);
+        mainVideo.play();
+        break;
+      case "start-": setLineTime(index, "start", line.start - NUDGE_SECONDS); break;
+      case "start+": setLineTime(index, "start", line.start + NUDGE_SECONDS); break;
+      case "end-": setLineTime(index, "end", line.end - NUDGE_SECONDS); break;
+      case "end+": setLineTime(index, "end", line.end + NUDGE_SECONDS); break;
+      case "start-now": setLineTime(index, "start", now); break;
+      case "end-now": setLineTime(index, "end", now); break;
+      case "add": {
+        const next = timings[index + 1];
+        const gap = next ? next.start - line.end : 2;
+        const MIN_NEW = 0.5;
+        let start = round2(line.end);
+        let length = Math.min(2, Math.max(gap, MIN_NEW));
+        if (gap < MIN_NEW) {
+          // Back-to-back lines: take the room from the end of this line so neighbouring
+          // lines don't get pushed around by the server's overlap resolution.
+          const room = Math.min(MIN_NEW, Math.max(0, (line.end - line.start) / 2));
+          line.end = round2(line.end - room);
+          start = line.end;
+          length = Math.max(room, 0.1);
+        }
+        timings.splice(index + 1, 0, {
+          text: "new line",
+          start,
+          end: round2(start + length),
+          words: [],
+        });
+        focusAfterRender = index + 1;
+        renderLineList();
+        markDirty();
+        break;
+      }
+      case "delete":
+        if (!confirm(`Delete this line?\n\n"${line.text}"`)) return;
+        timings.splice(index, 1);
+        renderLineList();
+        markDirty();
+        break;
+    }
+  });
+
+  // Re-render deferred while typing once focus leaves the list.
+  linesList.addEventListener("focusout", () => {
+    setTimeout(() => {
+      if (pendingRender && !linesList.contains(document.activeElement)) renderLineList();
+    }, 0);
+  });
+
+  window.addEventListener("beforeunload", (e) => {
+    if (dirtySong || saveInFlight) e.preventDefault();
+  });
+}
+
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
+// CSS approximation of the effects the browser can mirror. Zoom, glitch, noise and frame rate
+// only appear in rendered output / the single-frame preview.
+function updateLofiPreviewCSS() {
+  const s = aestheticState;
+  const on = s.enabled;
+  if (lofiScanlinesLayer) {
+    const active = on && s.crt_scanlines && (s.scanline_strength ?? 0.09) > 0;
+    lofiScanlinesLayer.classList.toggle("active", active);
+    // 0.09 darkening in the renderer ~ 0.28 alpha for the 1px CSS line
+    lofiScanlinesLayer.style.setProperty("--scan-alpha", clamp((s.scanline_strength ?? 0.09) * 3.1, 0, 1));
+    lofiScanlinesLayer.style.setProperty("--scan-period", `${s.scanline_spacing ?? 3}px`);
+  }
+  if (lofiFogLayer) {
+    const active = on && s.fogged_glass_vignette && (s.fog_amount ?? 1) > 0;
+    lofiFogLayer.classList.toggle("active", active);
+    lofiFogLayer.style.opacity = active ? String(clamp(s.fog_amount ?? 1, 0, 1)) : "0";
+  }
+  if (mainVideo) {
+    if (on && s.el_cocuy_wash && (s.wash_amount ?? 1) > 0) {
+      const a = s.wash_amount ?? 1;
+      const desat = s.wash_desat ?? 1;
+      mainVideo.style.filter =
+        `contrast(${1 + 0.18 * a}) brightness(${1 - 0.08 * a}) ` +
+        `hue-rotate(${-12 * a}deg) saturate(${clamp(1 - 0.35 * a * desat, 0, 2)})`;
+    } else {
+      mainVideo.style.filter = "";
+    }
+  }
+  updateOverlay();
+}
+
+// Where the caption sits, in 1080x1920 render space: the explicit drag/slider position when set,
+// otherwise the alignment grid + bottom margin (same rules the overlay has always used).
+function effectivePos() {
+  if (styleState.pos_x !== null && styleState.pos_y !== null) {
+    return { x: styleState.pos_x, y: styleState.pos_y };
+  }
+  const al = styleState.alignment;
+  let x = 540;
+  if ([7, 4, 1].includes(al)) x = 0.15 * 1080;
+  else if ([9, 6, 3].includes(al)) x = 0.85 * 1080;
+  let y;
+  if ([7, 8, 9].includes(al)) y = 0.15 * 1920;
+  else if ([4, 5, 6].includes(al)) y = 0.5 * 1920;
+  else y = 1920 - styleState.margin_v;
+  return { x: Math.round(x), y: Math.round(y) };
+}
+
+// The renderer only honours pos_x/pos_y when BOTH are set, so moving one slider must seed the other
+// from where the caption currently is (otherwise the first slider does nothing).
+function seedCustomPosition() {
+  if (styleState.pos_x !== null && styleState.pos_y !== null) return;
+  const cur = effectivePos();
+  if (styleState.pos_x === null) styleState.pos_x = cur.x;
+  if (styleState.pos_y === null) styleState.pos_y = cur.y;
+}
+
+// Write the position-related controls from styleState (sliders, labels, alignment buttons).
+function syncPositionControls() {
+  const custom = styleState.pos_x !== null && styleState.pos_y !== null;
+  const pos = effectivePos();
+  posX.value = pos.x;
+  posY.value = pos.y;
+  const al = styleState.alignment;
+  const gridX = [7, 4, 1].includes(al) ? "Left" : [9, 6, 3].includes(al) ? "Right" : "Center";
+  posXVal.textContent = custom ? `${pos.x}px` : gridX;
+  posYVal.textContent = custom ? `${pos.y}px` : "Grid";
+  marginV.value = styleState.margin_v;
+  marginVVal.textContent = styleState.margin_v;
+  document.querySelectorAll(".btn-align").forEach((b) => {
+    b.classList.toggle("active", parseInt(b.dataset.align, 10) === styleState.alignment);
+  });
 }
 
 // Live Subtitle Overlay Renderer
 function updateOverlay() {
   if (!mainVideo.videoWidth) return;
+  // videoWidth is the intrinsic size; the element can still be displayed at 0x0 (e.g. while the
+  // layout is being squeezed). Hide rather than compute coordinates from a zero-size box.
+  if (!mainVideo.clientWidth || !mainVideo.clientHeight) {
+    subOverlay.style.display = "none";
+    return;
+  }
 
   const t = mainVideo.currentTime;
   const currentLine = timings.find((l) => t >= l.start - 0.15 && t <= l.end + 0.35);
@@ -288,27 +828,28 @@ function updateOverlay() {
   // Scale font relative to container height vs 1920 reference video
   const vidHeight = mainVideo.clientHeight || videoContainer.clientHeight;
   const scaleRatio = vidHeight / 1920;
-  const computedFontSize = Math.max(12, styleState.font_size * scaleRatio);
+  const computedFontSize = Math.max(3, styleState.font_size * scaleRatio);
   subOverlay.style.fontSize = `${computedFontSize}px`;
 
   // Scale subtitle box width to force blocky line wrapping
   const vidWidth = mainVideo.clientWidth || videoContainer.clientWidth;
   if (styleState.box_width) {
     const scaleRatioW = vidWidth / 1080;
-    const computedMaxW = Math.max(160, styleState.box_width * scaleRatioW);
+    const computedMaxW = Math.max(40, styleState.box_width * scaleRatioW);
     subOverlay.style.maxWidth = `${computedMaxW}px`;
   } else {
     subOverlay.style.maxWidth = "90%";
   }
 
   // Outline, Shadow & Chromatic simulation
-  const strokePx = Math.max(1, styleState.outline * scaleRatio * 1.5);
+  const strokePx = Math.max(0.4, styleState.outline * scaleRatio * 1.5);
   const shadowPx = styleState.shadow * scaleRatio * 2;
   subOverlay.style.webkitTextStroke = `${strokePx}px ${styleState.outline_color}`;
 
   let shadowStr = `${shadowPx}px ${shadowPx}px 0px ${styleState.outline_color}`;
-  if (aestheticState.enabled && aestheticState.chromatic_aberration) {
-    shadowStr += `, -2px 0 rgba(255, 30, 80, 0.65), 2px 0 rgba(0, 150, 255, 0.65)`;
+  if (aestheticState.enabled && aestheticState.chromatic_aberration && (aestheticState.ca_shift_px ?? 3) > 0) {
+    const off = ((aestheticState.ca_shift_px ?? 3) * 2) / 3; // 3px in the render ~ 2px in the player
+    shadowStr += `, -${off}px 0 rgba(255, 30, 80, 0.65), ${off}px 0 rgba(0, 150, 255, 0.65)`;
   }
   subOverlay.style.textShadow = shadowStr;
 
@@ -326,22 +867,9 @@ function updateOverlay() {
   const offsetX = vidRect.left - contRect.left;
   const offsetY = vidRect.top - contRect.top;
 
-  let xPct = 50;
-  let yPct = 80;
-
-  if (styleState.pos_x !== null && styleState.pos_y !== null) {
-    xPct = (styleState.pos_x / 1080) * 100;
-    yPct = (styleState.pos_y / 1920) * 100;
-  } else {
-    const al = styleState.alignment;
-    if ([7, 4, 1].includes(al)) xPct = 15;
-    else if ([9, 6, 3].includes(al)) xPct = 85;
-    else xPct = 50;
-
-    if ([7, 8, 9].includes(al)) yPct = 15;
-    else if ([4, 5, 6].includes(al)) yPct = 50;
-    else yPct = ((1920 - styleState.margin_v) / 1920) * 100;
-  }
+  const pos = effectivePos();
+  const xPct = (pos.x / 1080) * 100;
+  const yPct = (pos.y / 1920) * 100;
 
   subOverlay.style.left = `${offsetX + (vidWidth * xPct) / 100}px`;
   subOverlay.style.top = `${offsetY + (vidHeight * yPct) / 100}px`;
@@ -368,8 +896,12 @@ function updateOverlay() {
   const activeIdx = timings.indexOf(currentLine);
   document.querySelectorAll(".line-item").forEach((el, idx) => {
     if (idx === activeIdx) {
+      const becameActive = !el.classList.contains("active");
       el.classList.add("active");
-      el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      // Only follow playback; don't yank the list while the user is editing in it.
+      if (becameActive && !linesList.contains(document.activeElement)) {
+        el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      }
     } else {
       el.classList.remove("active");
     }
@@ -400,10 +932,7 @@ function setupDragReposition() {
 
     styleState.pos_x = refX;
     styleState.pos_y = refY;
-    posX.value = refX;
-    posY.value = refY;
-    posXVal.textContent = `${refX}px`;
-    posYVal.textContent = `${refY}px`;
+    syncPositionControls();
 
     updateOverlay();
   });
@@ -473,8 +1002,7 @@ function setupEventListeners() {
 
   fontLowercase.addEventListener("change", (e) => {
     styleState.lowercase = e.target.checked;
-    renderLineList();
-    updateOverlay();
+    updateOverlay(); // the line editor shows raw text, so it needs no re-render (that stole the caret)
   });
 
   letterSpacing.addEventListener("input", (e) => {
@@ -530,29 +1058,30 @@ function setupEventListeners() {
       styleState.alignment = parseInt(btn.dataset.align, 10);
       styleState.pos_x = null;
       styleState.pos_y = null;
-      posXVal.textContent = "Center";
-      posYVal.textContent = "Grid";
+      syncPositionControls();
       updateOverlay();
     });
   });
 
   marginV.addEventListener("input", (e) => {
     styleState.margin_v = parseInt(e.target.value, 10);
-    marginVVal.textContent = e.target.value;
+    styleState.pos_x = null;
     styleState.pos_y = null;
-    posYVal.textContent = "Grid";
+    syncPositionControls();
     updateOverlay();
   });
 
   posX.addEventListener("input", (e) => {
+    seedCustomPosition();
     styleState.pos_x = parseInt(e.target.value, 10);
-    posXVal.textContent = `${e.target.value}px`;
+    syncPositionControls();
     updateOverlay();
   });
 
   posY.addEventListener("input", (e) => {
+    seedCustomPosition();
     styleState.pos_y = parseInt(e.target.value, 10);
-    posYVal.textContent = `${e.target.value}px`;
+    syncPositionControls();
     updateOverlay();
   });
 
@@ -584,38 +1113,35 @@ function setupEventListeners() {
   lofiMasterToggle.addEventListener("change", (e) => {
     aestheticState.enabled = e.target.checked;
     updateLofiPreviewCSS();
+    scheduleFxFrame();
   });
 
-  const bindAesthetic = (elem, prop) => {
-    if (!elem) return;
-    elem.addEventListener("change", (e) => {
-      aestheticState[prop] = e.target.checked;
-      updateLofiPreviewCSS();
-    });
-  };
-
-  bindAesthetic(fxElCocuy, "el_cocuy_wash");
-  bindAesthetic(fxDecimate, "framerate_decimate");
-  bindAesthetic(fxIsoNoise, "iso_noise");
-  bindAesthetic(fxChromatic, "chromatic_aberration");
-  bindAesthetic(fxFoggedGlass, "fogged_glass_vignette");
-  bindAesthetic(fxScanlines, "crt_scanlines");
-  bindAesthetic(fxSidechain, "sidechain_pump");
-  bindAesthetic(fxGlitch, "fuzzed_glitch");
+  btnFxFrame.addEventListener("click", renderFxFrame);
+  btnFxResetAll.addEventListener("click", () => {
+    if (!fxSchema) return;
+    const enabled = aestheticState.enabled;
+    aestheticState = { ...fxSchema.defaults, enabled };
+    syncFxControls();
+    updateLofiPreviewCSS();
+    scheduleFxFrame();
+  });
 
   // Presets load/save
   presetSelect.addEventListener("change", (e) => {
     const p = presets[e.target.value];
-    if (p) applyStyle(p);
+    if (!p) return;
+    // A preset holds a caption style, FX settings, or both; apply whichever it has.
+    if (p.style) applyStyle(p.style);
+    if (p.aesthetics) applyAesthetics(p.aesthetics);
   });
 
   btnSavePreset.addEventListener("click", async () => {
-    const name = prompt("Name this preset:", "My Custom Style");
+    const name = prompt("Name this preset (saves caption style + FX settings):", "My Custom Style");
     if (!name) return;
     await fetch(`/api/presets/${encodeURIComponent(name)}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(styleState),
+      body: JSON.stringify({ style: styleState, aesthetics: aestheticState }),
     });
     await loadPresets();
     presetSelect.value = name;
@@ -624,15 +1150,36 @@ function setupEventListeners() {
   // Job Triggers
   btnRealign.addEventListener("click", async () => {
     if (!currentSong) return alert("Select a song first.");
-    if (!confirm(`Run Whisper alignment for "${currentSong}"?`)) return;
+    if (
+      !confirm(
+        `Run Whisper alignment for "${currentSong}"?\n\n` +
+          "This replaces the current line timings, including any manual edits " +
+          "(the original alignment is kept once as a .bak file next to the lyrics .json)."
+      )
+    ) {
+      return;
+    }
+    dirtySong = null; // discard unsaved edits; they would be overwritten anyway
+    clearTimeout(saveTimer);
     startJob("/api/align", { song_name: currentSong }, "Whisper Alignment", () => {
       selectSong(currentSong);
     });
   });
 
-  btnPreview10s.addEventListener("click", () => {
+  btnPreview10s.addEventListener("click", async () => {
     if (!currentSong) return alert("Select a song first.");
-    const curTime = mainVideo.currentTime || 24.0;
+    if (!(await flushTimings())) return alert("Lyric edits could not be saved; fix the error first.");
+    const startSec = pickPreviewStart();
+    if (
+      timings.length &&
+      !windowHasLyrics(startSec, PREVIEW_SECONDS) &&
+      !confirm(
+        `No lyric lines between ${formatTime(startSec)} and ${formatTime(startSec + PREVIEW_SECONDS)}, ` +
+          "so the preview will have no captions. Render anyway?"
+      )
+    ) {
+      return;
+    }
     startJob(
       "/api/preview",
       {
@@ -640,23 +1187,29 @@ function setupEventListeners() {
         style: styleState,
         aesthetics: aestheticState,
         apply_lofi: aestheticState.enabled,
-        start_sec: curTime,
-        duration_sec: 10.0,
+        start_sec: startSec,
+        duration_sec: PREVIEW_SECONDS,
       },
       "10-Second Lo-Fi Preview",
       (job) => {
         if (job.output_url) {
-          mainVideo.src = job.output_url;
-          mainVideo.play();
-          btnPlay.textContent = "⏸ Pause";
+          // Show the result in its own player; mainVideo stays on the source so the
+          // timeline, line list and the next preview's start time remain song-relative.
+          mainVideo.pause();
+          btnPlay.textContent = "▶ Play";
+          previewVideo.src = job.output_url;
+          previewPanel.hidden = false;
+          previewVideo.play().catch(() => {});
         }
       }
     );
   });
 
-  btnRenderFull.addEventListener("click", () => {
+
+  btnRenderFull.addEventListener("click", async () => {
     if (!currentSong) return alert("Select a song first.");
     if (!confirm(`Render full Lo-Fi video for "${currentSong}" with audio-reactive effects?`)) return;
+    if (!(await flushTimings())) return alert("Lyric edits could not be saved; fix the error first.");
     startJob(
       "/api/render",
       {
@@ -672,9 +1225,10 @@ function setupEventListeners() {
     );
   });
 
-  btnRenderClean.addEventListener("click", () => {
+  btnRenderClean.addEventListener("click", async () => {
     if (!currentSong) return alert("Select a song first.");
     if (!confirm(`Render clean (fast) video for "${currentSong}"?`)) return;
+    if (!(await flushTimings())) return alert("Lyric edits could not be saved; fix the error first.");
     startJob(
       "/api/render",
       {
@@ -727,7 +1281,7 @@ function applyStyle(st) {
   blurVal.textContent = styleState.blur || 0;
   karaokeToggle.checked = styleState.karaoke;
   karaokeTag.value = styleState.karaoke_tag || "kf";
-  renderLineList();
+  syncPositionControls();
   updateOverlay();
 }
 
@@ -746,28 +1300,52 @@ async function startJob(url, payload, title, onComplete) {
     jobTitle.textContent = title;
     jobProgressBar.style.width = "5%";
     jobMessage.textContent = "Queued...";
+    jobMessage.style.color = "";
     jobOutputLinks.innerHTML = "";
+    setJobButtonsDisabled(true);
 
     if (activeJobPollInterval) clearInterval(activeJobPollInterval);
+    const jobId = activeJobId;
+    let failedPolls = 0;
+    let polling = false;
+    const stopPolling = () => {
+      clearInterval(activeJobPollInterval);
+      activeJobPollInterval = null;
+      setJobButtonsDisabled(false);
+    };
     activeJobPollInterval = setInterval(async () => {
-      const jRes = await fetch(`/api/jobs/${activeJobId}`);
-      if (!jRes.ok) return;
-      const job = await jRes.json();
+      if (polling) return; // don't overlap requests
+      polling = true;
+      try {
+        const jRes = await fetch(`/api/jobs/${jobId}`);
+        if (!jRes.ok) throw new Error(`HTTP ${jRes.status}`);
+        failedPolls = 0;
+        const job = await jRes.json();
 
-      jobProgressBar.style.width = `${Math.min(100, Math.max(5, job.progress))}%`;
-      jobMessage.textContent = job.message;
+        jobProgressBar.style.width = `${Math.min(100, Math.max(5, job.progress))}%`;
+        jobMessage.textContent = job.message;
 
-      if (job.status === "completed") {
-        clearInterval(activeJobPollInterval);
-        jobMessage.textContent = "Done!";
-        if (job.output_url) {
-          jobOutputLinks.innerHTML = `<a href="${job.output_url}" target="_blank">Download Video</a>`;
+        if (job.status === "completed") {
+          stopPolling();
+          jobMessage.textContent = "Done!";
+          if (job.output_url) {
+            jobOutputLinks.innerHTML = `<a href="${job.output_url}" target="_blank">Download Video</a>`;
+          }
+          if (onComplete) onComplete(job);
+        } else if (job.status === "failed" || job.status === "cancelled") {
+          stopPolling();
+          jobMessage.textContent = job.error || "Job stopped.";
+          jobMessage.style.color = "var(--accent-danger)";
         }
-        if (onComplete) onComplete(job);
-      } else if (job.status === "failed" || job.status === "cancelled") {
-        clearInterval(activeJobPollInterval);
-        jobMessage.textContent = job.error || "Job stopped.";
-        jobMessage.style.color = "var(--accent-danger)";
+      } catch (err) {
+        // Server restarted / job id lost: give up instead of polling forever.
+        if (++failedPolls >= 5) {
+          stopPolling();
+          jobMessage.textContent = `Lost contact with the job (${err.message}).`;
+          jobMessage.style.color = "var(--accent-danger)";
+        }
+      } finally {
+        polling = false;
       }
     }, 800);
   } catch (err) {
