@@ -41,7 +41,8 @@ let styleState = {
 // (single source of truth in video_fx.py); this minimal object is only the pre-load fallback.
 let aestheticState = {
   enabled: true,
-  el_cocuy_wash: true,
+  color_wash: true,
+  color_grade: false,
   framerate_decimate: true,
   iso_noise: true,
   chromatic_aberration: true,
@@ -779,15 +780,24 @@ function updateLofiPreviewCSS() {
     lofiFogLayer.style.opacity = active ? String(clamp(s.fog_amount ?? 1, 0, 1)) : "0";
   }
   if (mainVideo) {
-    if (on && s.el_cocuy_wash && (s.wash_amount ?? 1) > 0) {
+    const parts = [];
+    if (on && s.color_wash && (s.wash_amount ?? 1) > 0) {
       const a = s.wash_amount ?? 1;
       const desat = s.wash_desat ?? 1;
-      mainVideo.style.filter =
+      parts.push(
         `contrast(${1 + 0.18 * a}) brightness(${1 - 0.08 * a}) ` +
-        `hue-rotate(${-12 * a}deg) saturate(${clamp(1 - 0.35 * a * desat, 0, 2)})`;
-    } else {
-      mainVideo.style.filter = "";
+        `hue-rotate(${-12 * a}deg) saturate(${clamp(1 - 0.35 * a * desat, 0, 2)})`
+      );
     }
+    if (on && s.color_grade) {
+      // rough CSS stand-ins for the renderer's grade (the FX frame preview is exact)
+      parts.push(
+        `brightness(${clamp(1 + (s.grade_brightness ?? 0) / 160 + (s.grade_fade ?? 0) / 400, 0.3, 2)}) ` +
+        `contrast(${clamp((s.grade_contrast ?? 1) - (s.grade_fade ?? 0) / 400, 0.3, 2)}) ` +
+        `saturate(${clamp(s.grade_saturation ?? 1, 0, 2)})`
+      );
+    }
+    mainVideo.style.filter = parts.join(" ");
   }
   updateOverlay();
 }

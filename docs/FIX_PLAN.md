@@ -28,3 +28,5 @@ New features (planned in `~/.claude/plans/update-the-plan-so-crispy-lantern.md`)
 | R-4 | Y position label read "Grid" | Fixed: Top / Middle / Bottom |
 | N-1 | No way to shift all captions in time | Added: global offset slider (per song, not part of presets) |
 | N-2 | Words could be cut mid-word when the column is narrow | Fixed: widen line, then shrink font, then hyphenate (`-`) as a last resort; live preview mirrors it |
+| N-3 | More configuration per effect | Added ~20 knobs: wash black crush + per-channel tint, optional Color Grade card (brightness/contrast/saturation/faded blacks), zoom constant + anchor, fog clear-centre radius + haze, chromatic vertical split + bass pulse, glitch slices/height/colour-swap, scanline thickness, grain size; two new looks ("FX · Faded Film", "FX · VHS Tape"). All defaults reproduce the previous output |
+| N-4 | Wash naming | The wash is now simply "Color Wash" (field `color_wash`) everywhere. Saved presets that still contain the old toggle key fall back to the default (on) |
