@@ -24,6 +24,7 @@ dependencies = [
   "soundfile>=0.12.0",
   "numpy>=1.22.0",
   "scipy>=1.8.0",
+  "Pillow>=10.0.0",
 ]
 
 [project.optional-dependencies]
@@ -39,3 +40,12 @@ content-tools-ui = "lyrics_sync_ui:main"
 
 [tool.setuptools]
 py-modules = ["lyrics_sync", "lyrics_sync_ui", "mov_to_mp4", "video_fx"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+# Explicit so a newer ruff's wider defaults don't turn CI red on unrelated style rules.
+select = ["E", "F", "I"]
+ignore = ["E501"]  # the existing code base uses long lines; not worth a mass rewrap

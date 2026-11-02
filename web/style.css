@@ -120,7 +120,8 @@ body {
   padding: 16px;
   gap: 12px;
   background-color: var(--bg-dark);
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto; /* if the window is too short, scroll instead of clipping/crushing */
 }
 
 .video-container {
@@ -133,6 +134,7 @@ body {
   justify-content: center;
   flex: 1;
   max-height: calc(100vh - 280px);
+  min-height: 200px; /* never let sibling content squeeze the video to 0 */
   border: 1px solid var(--border-color);
 }
 
@@ -170,11 +172,13 @@ body {
   position: absolute;
   top: 0; left: 0; right: 0; bottom: 0;
   pointer-events: none;
+  --scan-alpha: 0.28;
+  --scan-period: 3px;
   background: repeating-linear-gradient(
     to bottom,
     transparent 0px,
-    transparent 2px,
-    rgba(0, 0, 0, 0.28) 3px
+    transparent calc(var(--scan-period) - 1px),
+    rgba(0, 0, 0, var(--scan-alpha)) var(--scan-period)
   );
   opacity: 0;
   transition: opacity 0.3s ease;
@@ -258,8 +262,8 @@ body {
   border: 1px solid var(--border-color);
   display: flex;
   flex-direction: column;
-  height: 140px;
-  flex-shrink: 0;
+  flex: 0 1 230px; /* preferred height, but yields on short windows; the list scrolls inside */
+  min-height: 150px;
 }
 
 .lines-card-header {
@@ -291,11 +295,12 @@ body {
 
 .line-item {
   display: flex;
-  justify-content: space-between;
-  padding: 6px 10px;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
   border-radius: 4px;
   font-size: 12px;
-  cursor: pointer;
+  border-left: 3px solid transparent;
   transition: background 0.15s;
 }
 
@@ -305,14 +310,85 @@ body {
 
 .line-item.active {
   background-color: rgba(245, 158, 11, 0.15);
-  border-left: 3px solid var(--accent-primary);
+  border-left-color: var(--accent-primary);
 }
 
-.line-item .line-time {
+.line-row-top,
+.line-row-times {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.line-row-times {
+  flex-wrap: wrap;
+  justify-content: space-between;
+}
+
+.time-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.line-text-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-input);
+  color: var(--text-main);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 4px 6px;
+  font-size: 12px;
+}
+
+.line-start,
+.line-end {
+  width: 68px;
+  background: var(--bg-input);
+  color: var(--text-main);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 3px 4px;
   font-family: monospace;
-  color: var(--text-muted);
   font-size: 11px;
 }
+
+.line-text-input:focus,
+.line-start:focus,
+.line-end:focus {
+  outline: 1px solid var(--accent-primary);
+}
+
+.line-item .mini {
+  min-width: 22px;
+  height: 22px;
+  padding: 0 4px;
+  background: var(--bg-input);
+  color: var(--text-muted);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.line-item .mini:hover {
+  color: var(--text-main);
+  border-color: var(--accent-primary);
+}
+
+.line-item .mini.danger:hover {
+  border-color: var(--accent-danger);
+}
+
+.save-status {
+  margin-right: 10px;
+}
+
+.save-status.pending { color: var(--accent-primary); }
+.save-status.ok { color: var(--accent-success); }
+.save-status.error { color: var(--accent-danger); }
 
 .placeholder-msg {
   padding: 20px;
@@ -652,3 +728,112 @@ body {
   background-color: #2e3446;
   color: var(--text-main);
 }
+
+/* Result panels live outside the stage layout (the stage is fixed-height with overflow hidden,
+   so a panel inside it can only get its space by squeezing the video to nothing). */
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.panel-header .btn-secondary { flex: none; width: auto; padding: 4px 10px; }
+.panel-header h3 { font-size: 12px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.7);
+}
+.modal-backdrop[hidden] { display: none; }
+.dialog {
+  display: flex;
+  flex-direction: column;
+  max-width: min(92vw, 560px);
+  max-height: 94vh;
+  padding: 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+}
+.dialog video {
+  display: block;
+  min-height: 0;
+  max-width: 100%;
+  max-height: calc(94vh - 76px);
+  margin: 0 auto;
+  background: #000;
+  border-radius: 6px;
+}
+
+.float-panel {
+  position: fixed;
+  top: 76px;
+  right: 436px; /* sits just left of the 420px control panel, so the sliders stay reachable */
+  z-index: 900;
+  width: 280px;
+  max-height: calc(100vh - 92px);
+  overflow: auto;
+  padding: 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.55);
+}
+.float-panel[hidden] { display: none; }
+.float-panel img { display: block; width: 100%; height: auto; border-radius: 6px; background: #000; }
+@media (max-width: 1000px) { .float-panel { right: 12px; } }
+
+/* FX knob cards (generated from /api/aesthetics) */
+.fx-note {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin: 4px 0 10px;
+  line-height: 1.4;
+}
+.fx-controls { display: flex; flex-direction: column; gap: 6px; }
+.fx-card {
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-input);
+}
+.fx-card-head { display: flex; align-items: center; gap: 8px; padding: 6px 8px; }
+.fx-expand {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  background: none;
+  border: none;
+  color: var(--text-main);
+  text-align: left;
+  cursor: pointer;
+  padding: 0;
+}
+.fx-title { font-size: 12px; font-weight: 600; }
+.fx-hint { font-size: 10px; color: var(--text-muted); }
+.fx-card.open { border-color: var(--accent-primary); }
+.fx-card .mini {
+  min-width: 22px; height: 22px; padding: 0 4px;
+  background: var(--bg-card); color: var(--text-muted);
+  border: 1px solid var(--border-color); border-radius: 4px; cursor: pointer;
+}
+.fx-card .mini:hover { color: var(--text-main); border-color: var(--accent-primary); }
+.fx-card-body { padding: 4px 10px 10px; display: flex; flex-direction: column; gap: 8px; }
+.fx-card-body[hidden] { display: none; }
+.fx-row label { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-muted); }
+.fx-row input[type="range"] { width: 100%; }
+.fx-val { font-family: monospace; color: var(--text-main); }
+.fx-frame-bar { display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+
+/* Global subtitle offset */
+.offset-row { display: flex; gap: 6px; margin-top: 8px; }
+.offset-row .btn-secondary { flex: 1; width: auto; }
+.fine-print { margin: 8px 0 0; font-size: 11px; line-height: 1.4; color: var(--text-muted); }

@@ -1,21 +1,18 @@
 """Unit tests for lyrics_sync core functionality."""
 
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from lyrics_sync import (
     CaptionStyle,
-    ass_time,
     build_ass,
-    clean_line,
     find_closest,
     hex_to_ass_color,
     normalise_name,
-    normalise_section,
     parse_lyrics,
 )
 

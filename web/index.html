@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>content_tools - Lyrics & Subtitles Studio</title>
+  <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -47,11 +48,32 @@
         <input type="range" id="timelineSlider" class="timeline-slider" min="0" max="100" step="0.05" value="0">
       </div>
 
+      <!-- Rendered 10s preview: modal lightbox, outside the stage layout so it can't squeeze the video.
+           The source video stays loaded behind it (currentTime stays song time). -->
+      <div id="previewPanel" class="modal-backdrop" hidden>
+        <div class="dialog" role="dialog" aria-modal="true" aria-label="Preview result">
+          <div class="panel-header">
+            <h3>Preview result</h3>
+            <button id="btnClosePreview" class="btn-secondary">Close (Esc)</button>
+          </div>
+          <video id="previewVideo" controls playsinline preload="auto"></video>
+        </div>
+      </div>
+
+      <!-- Single-frame FX preview: floating and NON-modal so the FX sliders stay usable while it updates -->
+      <div id="fxFramePanel" class="float-panel" hidden>
+        <div class="panel-header">
+          <h3>FX frame <span id="fxFrameStatus" class="lines-meta"></span></h3>
+          <button id="btnCloseFxFrame" class="btn-secondary">Close</button>
+        </div>
+        <img id="fxFrameImg" alt="Frame with Lo-Fi effects applied">
+      </div>
+
       <!-- Clickable Line Timeline -->
       <div class="lines-card">
         <div class="lines-card-header">
           <h3>Lyric Lines</h3>
-          <span id="lineCount" class="lines-meta">0 lines</span>
+          <span class="lines-meta"><span id="saveStatus" class="save-status"></span><span id="lineCount">0 lines</span></span>
         </div>
         <div id="linesList" class="lines-list">
           <div class="placeholder-msg">Select a song to load lyrics and line timings.</div>
@@ -175,6 +197,21 @@
         </div>
       </div>
 
+      <!-- Global timing offset -->
+      <div class="panel-section">
+        <div class="section-title">Subtitle Timing</div>
+        <div class="control-group">
+          <label for="timeOffset">Offset (<span id="timeOffsetVal">0.00</span>s)</label>
+          <input type="range" id="timeOffset" min="-5" max="5" step="0.01" value="0">
+        </div>
+        <div class="offset-row">
+          <button type="button" id="offsetMinus" class="btn-secondary">&minus;0.1s</button>
+          <button type="button" id="offsetPlus" class="btn-secondary">+0.1s</button>
+          <button type="button" id="offsetReset" class="btn-secondary">Reset</button>
+        </div>
+        <p class="fine-print">Moves every caption earlier (&minus;) or later (+) in the player and in previews/renders. The lyric line times above are not changed. Remembered per song.</p>
+      </div>
+
       <!-- Effects & Motion -->
       <div class="panel-section">
         <div class="section-title">Motion & Karaoke</div>
@@ -210,39 +247,16 @@
             <input type="checkbox" id="lofiMasterToggle" checked> Active
           </label>
         </div>
-        <div class="aesthetic-toggles-grid">
-          <label class="aesthetic-check">
-            <input type="checkbox" id="fxElCocuy" checked>
-            <span>"El Cocuy" Wash (crushed blacks, violet tint, 65% warm desat)</span>
-          </label>
-          <label class="aesthetic-check">
-            <input type="checkbox" id="fxDecimate" checked>
-            <span>15fps Decimation (choppy camcorder stutter)</span>
-          </label>
-          <label class="aesthetic-check">
-            <input type="checkbox" id="fxIsoNoise" checked>
-            <span>Dynamic ISO Noise (audio-reactive film grain)</span>
-          </label>
-          <label class="aesthetic-check">
-            <input type="checkbox" id="fxChromatic" checked>
-            <span>Subtle Chromatic Aberration (radial R/B lens shift)</span>
-          </label>
-          <label class="aesthetic-check">
-            <input type="checkbox" id="fxFoggedGlass" checked>
-            <span>"Fogged Glass" (radial condensation blur)</span>
-          </label>
-          <label class="aesthetic-check">
-            <input type="checkbox" id="fxScanlines" checked>
-            <span>CRT Scanlines (glowing monitor horizontal lines)</span>
-          </label>
-          <label class="aesthetic-check">
-            <input type="checkbox" id="fxSidechain" checked>
-            <span>808s Sidechain Pumping (audio-reactive bass bounce)</span>
-          </label>
-          <label class="aesthetic-check">
-            <input type="checkbox" id="fxGlitch" checked>
-            <span>Fuzzed Chord Glitch (mid-range pixel slice displacement)</span>
-          </label>
+        <p class="fx-note">Each effect has its own controls. The live player mirrors scanlines, fog, wash and
+          chromatic shift; zoom, glitch, noise and frame rate only show in a rendered preview or the
+          single-frame preview below.</p>
+        <div id="fxControls" class="fx-controls">
+          <div class="placeholder-msg">Loading effects...</div>
+        </div>
+        <div class="fx-frame-bar">
+          <button id="btnFxFrame" class="btn-secondary">🔍 Preview FX on current frame</button>
+          <label class="switch-label"><input type="checkbox" id="fxAutoRefresh"> Auto-refresh</label>
+          <button id="btnFxResetAll" class="btn-secondary">Reset all</button>
         </div>
       </div>
 

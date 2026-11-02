@@ -2,34 +2,32 @@
 """Local FastAPI web UI for lyrics synchronization, subtitle styling, and video rendering."""
 
 import argparse
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
 import json
-import mimetypes
 import os
-from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import threading
-import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
+import cv2
+import uvicorn
 from fastapi import Body, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-import uvicorn
 
-import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from lyrics_sync import (
     AUDIO_DIR,
-    CaptionStyle,
     LYRICS_DIR,
     PROJECT_ROOT,
     VIDEO_DIR,
+    CaptionStyle,
     align_lyrics,
     build_ass,
     find_closest,
@@ -37,10 +35,11 @@ from lyrics_sync import (
     get_duration,
     has_audio,
     normalise_name,
+    normalise_timings,
     parse_lyrics,
     render,
 )
-from video_fx import AestheticConfig, process_video_lofi
+from video_fx import AestheticConfig, aesthetic_schema, process_video_lofi, render_fx_frame
 
 app = FastAPI(title="content_tools - Lyrics & Subtitles Studio")
 app.add_middleware(
@@ -216,6 +215,38 @@ def get_timings(song_name: str):
     raise HTTPException(status_code=404, detail="No timings found for song")
 
 
+@app.put("/api/timings/{song_name}")
+def put_timings(song_name: str, payload: dict = Body(...)):
+    """Persist user-edited line text/start/end and return the normalised result.
+
+    Writes the exact file that /api/preview and /api/render read. The first save keeps the
+    original alignment as ``<file>.bak`` so a bad edit (or a re-align) can be undone.
+    """
+    try:
+        timings = normalise_timings(payload.get("timings"))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not timings:
+        raise HTTPException(status_code=400, detail="At least one non-empty line is required")
+
+    # Only allow songs that exist (get_timings does the same fuzzy lookup), so a crafted
+    # name can't create arbitrary files.
+    video = find_closest(VIDEO_DIR, song_name, {".mp4", ".mov"}, exclude=(" - lyrics", "_lyrics"))
+    if not video:
+        raise HTTPException(status_code=404, detail="Source video not found")
+    target = VIDEO_DIR / f"{song_name} - lyrics.json"
+    if target.resolve().parent != VIDEO_DIR.resolve():
+        raise HTTPException(status_code=400, detail="Invalid song name")
+
+    backup = target.with_name(target.name + ".bak")
+    if target.exists() and not backup.exists():
+        shutil.copyfile(target, backup)
+    tmp = target.with_name(target.name + ".tmp")
+    tmp.write_text(json.dumps(timings, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(target)
+    return {"timings": timings, "path": str(target)}
+
+
 @app.get("/api/video/source/{song_name}")
 def stream_source_video(song_name: str, request: Request):
     video = find_closest(VIDEO_DIR, song_name, {".mp4", ".mov", ".m4v"}, exclude=(" - lyrics", "_lyrics"))
@@ -242,18 +273,96 @@ def stream_rendered_video(song_name: str, request: Request):
 
 @app.get("/api/aesthetics")
 def get_aesthetics():
-    """Return default aesthetic toggles and config."""
-    return AestheticConfig().to_dict()
+    """Defaults plus the knob schema (groups, labels, ranges) the UI builds its controls from."""
+    return aesthetic_schema()
+
+
+_FX_FRAME_SLOTS = threading.BoundedSemaphore(2)
+
+
+@app.post("/api/fx-frame")
+def fx_frame(payload: dict = Body(...)):
+    """Render one source frame with the Lo-Fi stack applied (JPEG) for fast knob tuning."""
+    song_name = payload.get("song_name")
+    video = find_closest(VIDEO_DIR, song_name or "", {".mp4", ".mov"}, exclude=(" - lyrics", "_lyrics"))
+    if not video:
+        raise HTTPException(status_code=404, detail="Source video not found")
+    try:
+        time_sec = float(payload.get("time_sec", 0.0))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="time_sec must be a number")
+    cfg = AestheticConfig.from_dict(payload.get("aesthetics") or {})
+    try:
+        # Sync endpoints run on a big thread pool; cap concurrent renders so slider spam can't
+        # spawn a pile of ffmpeg/librosa jobs.
+        with _FX_FRAME_SLOTS:
+            frame = render_fx_frame(video, time_sec, cfg)
+    except RuntimeError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 88])
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to encode frame")
+    return Response(content=buf.tobytes(), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+def _normalise_preset(raw) -> dict:
+    """Presets are ``{"style": {...} | None, "aesthetics": {...} | None}``.
+
+    A ``None`` half means "leave that part of the studio as it is" when the preset is applied.
+    Older preset files stored a bare caption-style dict; those become style-only presets.
+    """
+    if not isinstance(raw, dict):
+        return {"style": None, "aesthetics": None}
+    if "style" in raw or "aesthetics" in raw:
+        style, fx = raw.get("style"), raw.get("aesthetics")
+    else:
+        style, fx = raw, None
+    if isinstance(style, dict):
+        style = CaptionStyle.from_dict(style).to_dict()
+        style.pop("time_offset", None)  # per-song timing, not part of a look
+    else:
+        style = None
+    return {
+        "style": style,
+        "aesthetics": AestheticConfig.from_dict(fx).to_dict() if isinstance(fx, dict) else None,
+    }
+
+
+# Built-in FX looks (style left untouched). Values are overrides on top of AestheticConfig defaults.
+FX_LOOK_PRESETS = {
+    "FX · Original": {},
+    "FX · Subtle": {
+        "wash_amount": 0.5, "zoom_amount": 0.012, "fog_amount": 0.6, "ca_shift_px": 2,
+        "glitch_probability": 0.2, "scanline_strength": 0.05, "noise_gain": 0.6, "target_fps": 24,
+    },
+    "FX · Heavy Lo-Fi": {
+        "wash_tint": 1.5, "zoom_amount": 0.05, "fog_amount": 1.2, "fog_blur": 14, "ca_shift_px": 6,
+        "glitch_threshold": 0.35, "glitch_probability": 0.7, "glitch_max_shift": 40,
+        "scanline_strength": 0.2, "noise_gain": 1.5, "target_fps": 12, "low_release": 120,
+    },
+}
 
 
 @app.get("/api/presets")
 def get_presets():
+    stored = None
     if PRESETS_FILE.exists():
         try:
-            return json.loads(PRESETS_FILE.read_text(encoding="utf-8"))
+            stored = json.loads(PRESETS_FILE.read_text(encoding="utf-8"))
         except Exception:
-            pass
-    # Default presets
+            stored = None
+    if isinstance(stored, dict):
+        presets = {name: _normalise_preset(p) for name, p in stored.items()}
+    else:
+        presets = {name: _normalise_preset(p) for name, p in _default_style_presets().items()}
+    for name, overrides in FX_LOOK_PRESETS.items():
+        presets.setdefault(
+            name, {"style": None, "aesthetics": AestheticConfig.from_dict(overrides).to_dict()}
+        )
+    return presets
+
+
+def _default_style_presets() -> dict:
     default_presets = {
         "Lo-Fi Emo-Trap (Default)": CaptionStyle(
             font_name="Helvetica",
@@ -310,9 +419,11 @@ def get_presets():
 
 
 @app.post("/api/presets/{preset_name}")
-def save_preset(preset_name: str, style_data: dict = Body(...)):
+def save_preset(preset_name: str, data: dict = Body(...)):
+    """Save ``{"style": {...}, "aesthetics": {...}}`` (a bare style dict is still accepted)."""
     presets = get_presets()
-    presets[preset_name] = CaptionStyle.from_dict(style_data).to_dict()
+    presets[preset_name] = _normalise_preset(data)
+    PRESETS_FILE.parent.mkdir(parents=True, exist_ok=True)
     PRESETS_FILE.write_text(json.dumps(presets, indent=2), encoding="utf-8")
     return {"status": "ok", "presets": presets}
 
@@ -402,6 +513,25 @@ def start_align(payload: dict = Body(...)):
     return {"job_id": job.id}
 
 
+MAX_PREVIEW_CLIPS = 12
+_JOB_STEM = re.compile(r"^[0-9a-f]{10}(_sub)?$")
+
+
+def prune_previews(keep: int = MAX_PREVIEW_CLIPS) -> None:
+    """Delete the oldest generated preview clips (and their .ass files), keeping ``keep``.
+
+    Only files named like job ids are touched, so anything else a user drops in the folder is safe.
+    """
+    try:
+        clips = [p for p in PREVIEWS_DIR.glob("*.mp4") if _JOB_STEM.match(p.stem)]
+        clips.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        for old in clips[keep:]:
+            for leftover in PREVIEWS_DIR.glob(f"{old.stem}.*"):
+                leftover.unlink(missing_ok=True)
+    except OSError:
+        pass  # pruning is best-effort; never block a preview on it
+
+
 @app.post("/api/preview")
 def start_preview(payload: dict = Body(...)):
     song_name = payload.get("song_name")
@@ -419,6 +549,7 @@ def start_preview(payload: dict = Body(...)):
     if not timings_path.exists():
         raise HTTPException(status_code=400, detail="Timings not found. Run alignment first.")
 
+    prune_previews()
     job = Job("preview", song_name)
     with jobs_lock:
         jobs[job.id] = job
@@ -472,10 +603,12 @@ def start_preview(payload: dict = Body(...)):
                     job.progress = 30.0 + (pct * 0.70)
                     job.message = msg
 
+                # temp_sub_clip is already cut to [start_sec, start_sec + duration_sec] and
+                # keeps its audio track, so analyse/mux audio from the clip itself. Using the
+                # full source here read the audio from 0s of the song instead of the window.
                 process_video_lofi(
                     temp_sub_clip,
                     out_clip,
-                    audio_source=video,
                     config=cfg,
                     on_progress=on_lofi_progress,
                     cancel_check=lambda: job.cancel_requested,
@@ -522,7 +655,11 @@ def start_render(payload: dict = Body(...)):
     def run():
         job.status = "running"
         job.message = "Preparing video export..."
-        temp_clean_render = None
+        # Everything is written to scratch files first and only moved over the real output once
+        # the whole job succeeded, so a cancelled/failed render can't clobber an earlier export.
+        final_out = VIDEO_DIR / f"{song_name} - lyrics.mp4"
+        scratch_clean = VIDEO_DIR / f"{song_name} - lyrics.clean.part.mp4"
+        scratch_out = VIDEO_DIR / f"{song_name} - lyrics.part.mp4"
         try:
             style = CaptionStyle.from_dict(style_dict)
             aligned = json.loads(timings_path.read_text(encoding="utf-8"))
@@ -532,14 +669,8 @@ def start_render(payload: dict = Body(...)):
             final_ass = VIDEO_DIR / f"{song_name} - lyrics.ass"
             final_ass.write_text(ass_text, encoding="utf-8")
 
-            final_out = VIDEO_DIR / f"{song_name} - lyrics.mp4"
             ffmpeg = find_ffmpeg()
-
-            if lofi_mode:
-                temp_clean_render = VIDEO_DIR / f"{song_name} - lyrics_clean.mp4"
-                target_burn = temp_clean_render
-            else:
-                target_burn = final_out
+            target_burn = scratch_clean if lofi_mode else scratch_out
 
             def on_progress(k, v):
                 if k == "out_time_us":
@@ -568,14 +699,15 @@ def start_render(payload: dict = Body(...)):
                     job.message = msg
 
                 process_video_lofi(
-                    temp_clean_render,
-                    final_out,
+                    scratch_clean,
+                    scratch_out,
                     audio_source=video,
                     config=cfg,
                     on_progress=on_lofi_progress,
                     cancel_check=lambda: job.cancel_requested,
                 )
 
+            os.replace(scratch_out, final_out)
             job.status = "completed"
             job.progress = 100.0
             job.message = "Export completed!"
@@ -584,6 +716,9 @@ def start_render(payload: dict = Body(...)):
             job.status = "cancelled" if job.cancel_requested else "failed"
             job.error = str(e)
             job.message = f"Render failed: {e}"
+        finally:
+            for scratch in (scratch_clean, scratch_out):
+                scratch.unlink(missing_ok=True)
 
     executor.submit(run)
     return {"job_id": job.id}

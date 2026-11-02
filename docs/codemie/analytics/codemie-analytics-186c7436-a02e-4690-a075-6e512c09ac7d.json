@@ -1,0 +1,260 @@
+{
+  "meta": {
+    "generatedAt": "2026-11-01T23:47:18.044Z",
+    "rangeLabel": "all",
+    "agents": [
+      "claude"
+    ],
+    "projectFilter": "all",
+    "totals": {
+      "sessions": 1,
+      "durationMs": 156125,
+      "turns": 6,
+      "files": 1,
+      "netLines": 40,
+      "toolCallsTotal": 6,
+      "toolSuccessRate": 66.7,
+      "totalCostUSD": 0.1576727,
+      "cacheReadCostUSD": 0.023688700000000004,
+      "pricedSessions": 1
+    },
+    "unpricedModels": [],
+    "estimatedModels": [],
+    "localModels": [],
+    "coverage": [
+      {
+        "agentName": "claude",
+        "total": 1,
+        "priced": 1,
+        "withLog": 1
+      }
+    ],
+    "periodStart": "2026-11-01T23:44:39.357Z",
+    "periodEnd": "2026-11-01T23:47:15.482Z"
+  },
+  "sessions": [
+    {
+      "sessionId": "186c7436-a02e-4690-a075-6e512c09ac7d",
+      "agentName": "claude",
+      "provider": "ai-run-sso",
+      "title": "The command below was run directly in Claude Code, not sent to you as a request, and its output goes straight to the user. It's recorded here as context for later messages.",
+      "project": "/Users/santiago_martinez2/Documents/personal/content_tools",
+      "branch": "main",
+      "startTime": 1793576679357,
+      "durationMs": 156125,
+      "turns": 6,
+      "fileOps": 1,
+      "linesAdded": 40,
+      "linesRemoved": 0,
+      "linesModified": 0,
+      "netLines": 40,
+      "filesChanged": 1,
+      "filesWritten": 1,
+      "filesEdited": 0,
+      "toolCallsTotal": 6,
+      "toolCallsSuccess": 4,
+      "toolCallsFailure": 2,
+      "models": [
+        "claude-sonnet-5-5"
+      ],
+      "languages": [
+        "markdown"
+      ],
+      "tools": [
+        {
+          "toolName": "Bash",
+          "totalCalls": 5,
+          "successCount": 3,
+          "failureCount": 2,
+          "successRate": 60
+        },
+        {
+          "toolName": "Write",
+          "totalCalls": 1,
+          "successCount": 1,
+          "failureCount": 0,
+          "successRate": 100
+        }
+      ],
+      "tokens": {
+        "input": 12,
+        "output": 2854,
+        "cacheRead": 236887,
+        "cacheCreation": 26355,
+        "cacheCreation1h": 26355,
+        "total": 266108
+      },
+      "costUSD": 0.1576727,
+      "cacheReadCostUSD": 0.023688700000000004,
+      "perModelCost": [
+        {
+          "model": "claude-sonnet-5-5",
+          "tokens": {
+            "input": 4,
+            "output": 438,
+            "cacheRead": 61631,
+            "cacheCreation": 17864,
+            "cacheCreation1h": 17864,
+            "total": 79937
+          },
+          "costUSD": 0.0820071,
+          "unpriced": false
+        },
+        {
+          "model": "claude-sonnet-5-5",
+          "tokens": {
+            "input": 8,
+            "output": 2416,
+            "cacheRead": 175256,
+            "cacheCreation": 8491,
+            "cacheCreation1h": 8491,
+            "total": 186171
+          },
+          "costUSD": 0.0756656,
+          "unpriced": false
+        }
+      ],
+      "hadLog": true,
+      "agentSessionFile": "/Users/santiago_martinez2/.claude/projects/-Users-santiago-martinez2-Documents-personal-content-tools/57db8d2b-d71b-4709-91d3-8e443db77ea9.jsonl",
+      "costSeries": [
+        {
+          "t": 1793576711212,
+          "cost": 0.0699687,
+          "tokens": 39217
+        },
+        {
+          "t": 1793576714060,
+          "cost": 0.0820071,
+          "tokens": 79937
+        },
+        {
+          "t": 1793576716609,
+          "cost": 0.0957082,
+          "tokens": 122557
+        },
+        {
+          "t": 1793576718879,
+          "cost": 0.1124704,
+          "tokens": 167801
+        },
+        {
+          "t": 1793576730760,
+          "cost": 0.14242929999999998,
+          "tokens": 216732
+        },
+        {
+          "t": 1793576745244,
+          "cost": 0.15767269999999997,
+          "tokens": 266108
+        }
+      ],
+      "dispatches": [
+        {
+          "kind": "command",
+          "name": "model",
+          "start": 1793576687831,
+          "durationMs": 0,
+          "id": "command:ae6dfae5-868a-4064-b7fb-881eb7d4a26b:0",
+          "ownerAgentId": "186c7436-a02e-4690-a075-6e512c09ac7d",
+          "relationshipStatus": "root",
+          "elapsedMs": 0,
+          "status": "completed",
+          "attributionStatus": "unavailable",
+          "attributionScope": "owner-window"
+        },
+        {
+          "kind": "command",
+          "name": "init",
+          "start": 1793576706971,
+          "durationMs": 0,
+          "id": "command:434b460c-b8d3-4d6d-a40d-02e94b77e02d:0",
+          "ownerAgentId": "186c7436-a02e-4690-a075-6e512c09ac7d",
+          "relationshipStatus": "root",
+          "elapsedMs": 0,
+          "status": "completed",
+          "attributionStatus": "unavailable",
+          "attributionScope": "owner-window"
+        }
+      ],
+      "costSource": "native-estimate",
+      "costBasis": "standard-api-tokens",
+      "dispatchesComplete": true,
+      "rootOwnCostUSD": 0.1576727,
+      "unlinkedCostUSD": 0,
+      "unlinkedAgentIds": [],
+      "observedEnd": 1793576835482,
+      "rootOwnTokens": {
+        "input": 12,
+        "output": 2854,
+        "cacheRead": 236887,
+        "cacheCreation": 26355,
+        "cacheCreation1h": 26355,
+        "total": 266108
+      },
+      "unlinkedTokens": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheCreation": 0,
+        "cacheCreation1h": 0,
+        "total": 0
+      },
+      "modelTimeline": [
+        {
+          "t": 1793576711212,
+          "model": "claude-sonnet-5-5",
+          "costUSD": 0.0699687,
+          "tokens": 39217
+        },
+        {
+          "t": 1793576714060,
+          "model": "claude-sonnet-5-5",
+          "costUSD": 0.0120384,
+          "tokens": 40720
+        },
+        {
+          "t": 1793576716609,
+          "model": "claude-sonnet-5-5",
+          "costUSD": 0.0137011,
+          "tokens": 42620
+        },
+        {
+          "t": 1793576718879,
+          "model": "claude-sonnet-5-5",
+          "costUSD": 0.0167622,
+          "tokens": 45244
+        },
+        {
+          "t": 1793576730760,
+          "model": "claude-sonnet-5-5",
+          "costUSD": 0.0299589,
+          "tokens": 48931
+        },
+        {
+          "t": 1793576745244,
+          "model": "claude-sonnet-5-5",
+          "costUSD": 0.0152434,
+          "tokens": 49376
+        }
+      ],
+      "routedTurnsPct": 0,
+      "skillInvocations": [],
+      "agentInvocations": [],
+      "commandInvocations": [
+        {
+          "name": "model",
+          "totalCalls": 1,
+          "successCount": 1,
+          "failureCount": 0
+        },
+        {
+          "name": "init",
+          "totalCalls": 1,
+          "successCount": 1,
+          "failureCount": 0
+        }
+      ],
+      "sessionSource": "Pure chat"
+    }
+  ]
+}
