@@ -34,6 +34,7 @@ let styleState = {
   blur: 0.0,
   pop_scale: 0.0,
   letter_spacing: 0,
+  time_offset: 0,
 };
 
 // Lo-Fi Emo-Trap Aesthetic State. Defaults and knob ranges come from GET /api/aesthetics
@@ -107,6 +108,11 @@ const posYVal = document.getElementById("posYVal");
 // Motion elements
 const fadeIn = document.getElementById("fadeIn");
 const fadeInVal = document.getElementById("fadeInVal");
+const timeOffset = document.getElementById("timeOffset");
+const timeOffsetVal = document.getElementById("timeOffsetVal");
+const offsetMinus = document.getElementById("offsetMinus");
+const offsetPlus = document.getElementById("offsetPlus");
+const offsetReset = document.getElementById("offsetReset");
 const fadeOut = document.getElementById("fadeOut");
 const fadeOutVal = document.getElementById("fadeOutVal");
 const opacityTrailing = document.getElementById("opacityTrailing");
@@ -153,13 +159,41 @@ function pickPreviewStart() {
   const t = mainVideo.currentTime;
   if (Number.isFinite(t) && t > 0.05) return t;
   // Playhead untouched: begin at the first lyric line so the preview has captions.
-  const first = timings.length ? timings[0].start : 0;
+  const first = timings.length ? timings[0].start + lyricOffset() : 0;
   return Math.max(0, first - 0.5);
 }
 
 function windowHasLyrics(start, duration) {
   const end = start + duration;
-  return timings.some((l) => l.end > start && l.start < end);
+  const off = lyricOffset();
+  return timings.some((l) => l.end + off > start && l.start + off < end);
+}
+
+// ---------------------------------------------------------------------------
+// Global subtitle offset: shifts every caption (player + renders) without touching the line times.
+// Lyric time = video time - offset.
+// ---------------------------------------------------------------------------
+const lyricOffset = () => Number(styleState.time_offset) || 0;
+const offsetKey = (song) => `ct.offset:${song}`;
+
+function setTimeOffset(value, { persist = true } = {}) {
+  const v = Math.max(-5, Math.min(5, Math.round((Number(value) || 0) * 100) / 100));
+  styleState.time_offset = v;
+  timeOffset.value = v;
+  timeOffsetVal.textContent = (v > 0 ? "+" : "") + v.toFixed(2);
+  if (persist && currentSong) {
+    try {
+      if (v) localStorage.setItem(offsetKey(currentSong), String(v));
+      else localStorage.removeItem(offsetKey(currentSong));
+    } catch (_) { /* storage can be unavailable; the offset just isn't remembered */ }
+  }
+  updateOverlay();
+}
+
+function restoreSongOffset(song) {
+  let saved = 0;
+  try { saved = Number(localStorage.getItem(offsetKey(song))) || 0; } catch (_) { /* ignore */ }
+  setTimeOffset(saved, { persist: false });
 }
 
 // Initialize app
@@ -291,6 +325,7 @@ async function selectSong(songName) {
     dirtySong = null;
   }
   currentSong = songName;
+  restoreSongOffset(songName);
   setSaveStatus("");
   songStatusBadge.textContent = "Loading...";
   songStatusBadge.className = "status-badge";
@@ -308,12 +343,14 @@ async function selectSong(songName) {
       renderLineList();
     } else {
       timings = [];
+      lineCount.textContent = "0 lines";
       songStatusBadge.textContent = "No timings (Align needed)";
       songStatusBadge.className = "status-badge warning";
       linesList.innerHTML = '<div class="placeholder-msg">Click "Re-align" to sync lyrics with Whisper.</div>';
     }
   } catch (err) {
     timings = [];
+    lineCount.textContent = "0 lines";
     songStatusBadge.textContent = "Ready to align";
   }
 }
@@ -667,15 +704,15 @@ function setupLineEditor() {
     const now = mainVideo.currentTime || 0;
     switch (btn.dataset.action) {
       case "play":
-        mainVideo.currentTime = Math.max(0, line.start - 0.2);
+        mainVideo.currentTime = Math.max(0, line.start + lyricOffset() - 0.2);
         mainVideo.play();
         break;
       case "start-": setLineTime(index, "start", line.start - NUDGE_SECONDS); break;
       case "start+": setLineTime(index, "start", line.start + NUDGE_SECONDS); break;
       case "end-": setLineTime(index, "end", line.end - NUDGE_SECONDS); break;
       case "end+": setLineTime(index, "end", line.end + NUDGE_SECONDS); break;
-      case "start-now": setLineTime(index, "start", now); break;
-      case "end-now": setLineTime(index, "end", now); break;
+      case "start-now": setLineTime(index, "start", now - lyricOffset()); break;
+      case "end-now": setLineTime(index, "end", now - lyricOffset()); break;
       case "add": {
         const next = timings[index + 1];
         const gap = next ? next.start - line.end : 2;
@@ -790,7 +827,8 @@ function syncPositionControls() {
   const al = styleState.alignment;
   const gridX = [7, 4, 1].includes(al) ? "Left" : [9, 6, 3].includes(al) ? "Right" : "Center";
   posXVal.textContent = custom ? `${pos.x}px` : gridX;
-  posYVal.textContent = custom ? `${pos.y}px` : "Grid";
+  const gridY = [7, 8, 9].includes(al) ? "Top" : [4, 5, 6].includes(al) ? "Middle" : "Bottom";
+  posYVal.textContent = custom ? `${pos.y}px` : gridY;
   marginV.value = styleState.margin_v;
   marginVVal.textContent = styleState.margin_v;
   document.querySelectorAll(".btn-align").forEach((b) => {
@@ -799,6 +837,66 @@ function syncPositionControls() {
 }
 
 // Live Subtitle Overlay Renderer
+// ---------------------------------------------------------------------------
+// Keep words whole (mirror of plan_line_fit in lyrics_sync.py, in 1080x1920 script pixels).
+// A word is only cut when it is wider than the text column. Order of preference: widen the column
+// for that line, then shrink the font, and only as a last resort split the word with a trailing "-".
+// ---------------------------------------------------------------------------
+const FIT = { minScale: 0.6, minSide: 30, safety: 1.03 };
+const fitCtx = document.createElement("canvas").getContext("2d");
+
+function measureScript(text, size) {
+  fitCtx.font = `${styleState.italic ? "italic " : ""}${styleState.bold ? "bold " : ""}${size}px ` +
+    `"${styleState.font_name}", Helvetica, Arial, sans-serif`;
+  return fitCtx.measureText(text).width + (styleState.letter_spacing || 0) * text.length;
+}
+
+function splitWord(word, size, maxWidth) {
+  const chunks = [];
+  let rest = word;
+  while (rest.length > 2 && measureScript(rest, size) > maxWidth) {
+    let n = rest.length - 1;
+    while (n > 1 && measureScript(rest.slice(0, n) + "-", size) > maxWidth) n--;
+    chunks.push(rest.slice(0, n) + "-");
+    rest = rest.slice(n);
+  }
+  chunks.push(rest);
+  return chunks;
+}
+
+function baseMargins() {
+  if (styleState.box_width) {
+    const side = Math.max(10, Math.floor((1080 - Number(styleState.box_width)) / 2));
+    return [side, side];
+  }
+  return [styleState.margin_l ?? 70, styleState.margin_r ?? 70];
+}
+
+function planLineFit(words) {
+  const [ml, mr] = baseMargins();
+  const plan = { margins: [ml, mr], fontSize: styleState.font_size, chunks: {} };
+  const widths = words.map((w) => measureScript(w, styleState.font_size) * FIT.safety);
+  const widest = Math.max(0, ...widths);
+  if (widest <= 1080 - ml - mr) return plan;
+
+  const maxAvail = 1080 - 2 * FIT.minSide;
+  if (widest <= maxAvail) {
+    const side = Math.max(FIT.minSide, Math.floor((1080 - widest) / 2));
+    plan.margins = [Math.min(ml, side), Math.min(mr, side)];
+    return plan;
+  }
+  plan.margins = [FIT.minSide, FIT.minSide];
+  const scale = maxAvail / widest;
+  if (scale >= FIT.minScale) {
+    plan.fontSize = Math.max(1, Math.floor(styleState.font_size * scale * 0.98));
+    return plan;
+  }
+  words.forEach((w, i) => {
+    if (widths[i] > maxAvail) plan.chunks[i] = splitWord(w, styleState.font_size, maxAvail / FIT.safety);
+  });
+  return plan;
+}
+
 function updateOverlay() {
   if (!mainVideo.videoWidth) return;
   // videoWidth is the intrinsic size; the element can still be displayed at 0x0 (e.g. while the
@@ -808,7 +906,7 @@ function updateOverlay() {
     return;
   }
 
-  const t = mainVideo.currentTime;
+  const t = mainVideo.currentTime - lyricOffset(); // lyric time
   const currentLine = timings.find((l) => t >= l.start - 0.15 && t <= l.end + 0.35);
 
   if (!currentLine) {
@@ -817,6 +915,11 @@ function updateOverlay() {
   }
 
   subOverlay.style.display = "block";
+
+  const fmt = (str) => styleState.lowercase ? (str || "").toLowerCase() : (str || "");
+  const useKaraoke = styleState.karaoke && currentLine.words && currentLine.words.length;
+  const tokens = useKaraoke ? currentLine.words.map((w) => fmt(w.text)) : fmt(currentLine.text).split(/\s+/).filter(Boolean);
+  const plan = planLineFit(tokens);
 
   // Typography
   subOverlay.style.fontFamily = `"${styleState.font_name}", Helvetica, Arial, sans-serif`;
@@ -828,18 +931,13 @@ function updateOverlay() {
   // Scale font relative to container height vs 1920 reference video
   const vidHeight = mainVideo.clientHeight || videoContainer.clientHeight;
   const scaleRatio = vidHeight / 1920;
-  const computedFontSize = Math.max(3, styleState.font_size * scaleRatio);
+  const computedFontSize = Math.max(3, plan.fontSize * scaleRatio);
   subOverlay.style.fontSize = `${computedFontSize}px`;
 
   // Scale subtitle box width to force blocky line wrapping
   const vidWidth = mainVideo.clientWidth || videoContainer.clientWidth;
-  if (styleState.box_width) {
-    const scaleRatioW = vidWidth / 1080;
-    const computedMaxW = Math.max(40, styleState.box_width * scaleRatioW);
-    subOverlay.style.maxWidth = `${computedMaxW}px`;
-  } else {
-    subOverlay.style.maxWidth = "90%";
-  }
+  const scaleRatioW = vidWidth / 1080;
+  subOverlay.style.maxWidth = `${Math.max(40, (1080 - plan.margins[0] - plan.margins[1]) * scaleRatioW)}px`;
 
   // Outline, Shadow & Chromatic simulation
   const strokePx = Math.max(0.4, styleState.outline * scaleRatio * 1.5);
@@ -875,20 +973,17 @@ function updateOverlay() {
   subOverlay.style.top = `${offsetY + (vidHeight * yPct) / 100}px`;
   subOverlay.style.transform = "translate(-50%, -50%)";
 
-  // Karaoke and lowercase rendering
-  const fmt = (str) => styleState.lowercase ? (str || "").toLowerCase() : (str || "");
+  // Karaoke and lowercase rendering. Words are separated by real spaces so the browser wraps
+  // between words (like the renderer) instead of inside them.
+  const pieces = (i, text) => (plan.chunks[i] || [text]).map(escapeHtml).join("<br>");
 
-  if (styleState.karaoke && currentLine.words && currentLine.words.length) {
-    let wordHtml = "";
-    currentLine.words.forEach((w) => {
-      const isSung = t >= w.end;
-      const isSinging = t >= w.start && t < w.end;
-      const col = isSung || isSinging ? styleState.primary_color : styleState.secondary_color;
-      wordHtml += `<span style="color: ${col}; margin: 0 4px;">${escapeHtml(fmt(w.text))}</span>`;
-    });
-    subText.innerHTML = wordHtml;
+  if (useKaraoke) {
+    subText.innerHTML = currentLine.words.map((w, i) => {
+      const col = t >= w.start ? styleState.primary_color : styleState.secondary_color;
+      return `<span style="color: ${col};">${pieces(i, tokens[i])}</span>`;
+    }).join(" ");
   } else {
-    subText.textContent = fmt(currentLine.text);
+    subText.innerHTML = tokens.map((tok, i) => pieces(i, tok)).join(" ");
     subText.style.color = styleState.secondary_color;
   }
 
@@ -1085,6 +1180,12 @@ function setupEventListeners() {
     updateOverlay();
   });
 
+  // Global subtitle offset
+  timeOffset.addEventListener("input", (e) => setTimeOffset(e.target.value));
+  offsetMinus.addEventListener("click", () => setTimeOffset(lyricOffset() - 0.1));
+  offsetPlus.addEventListener("click", () => setTimeOffset(lyricOffset() + 0.1));
+  offsetReset.addEventListener("click", () => setTimeOffset(0));
+
   // Motion
   fadeIn.addEventListener("input", (e) => {
     styleState.fade_in_ms = parseInt(e.target.value, 10);
@@ -1141,7 +1242,10 @@ function setupEventListeners() {
     await fetch(`/api/presets/${encodeURIComponent(name)}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ style: styleState, aesthetics: aestheticState }),
+      body: JSON.stringify({
+        style: Object.fromEntries(Object.entries(styleState).filter(([k]) => k !== "time_offset")),
+        aesthetics: aestheticState,
+      }),
     });
     await loadPresets();
     presetSelect.value = name;
@@ -1251,7 +1355,9 @@ function setupEventListeners() {
 }
 
 function applyStyle(st) {
-  Object.assign(styleState, st);
+  // The offset belongs to the song, not to a look: presets must not overwrite it.
+  const { time_offset: _ignored, ...look } = st || {};
+  Object.assign(styleState, look);
   fontInput.value = styleState.font_name || "Helvetica";
   fontSize.value = styleState.font_size;
   fontSizeVal.textContent = styleState.font_size;
@@ -1281,6 +1387,7 @@ function applyStyle(st) {
   blurVal.textContent = styleState.blur || 0;
   karaokeToggle.checked = styleState.karaoke;
   karaokeTag.value = styleState.karaoke_tag || "kf";
+  setTimeOffset(styleState.time_offset, { persist: false });
   syncPositionControls();
   updateOverlay();
 }

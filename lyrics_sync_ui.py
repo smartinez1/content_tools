@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -316,8 +317,13 @@ def _normalise_preset(raw) -> dict:
         style, fx = raw.get("style"), raw.get("aesthetics")
     else:
         style, fx = raw, None
+    if isinstance(style, dict):
+        style = CaptionStyle.from_dict(style).to_dict()
+        style.pop("time_offset", None)  # per-song timing, not part of a look
+    else:
+        style = None
     return {
-        "style": CaptionStyle.from_dict(style).to_dict() if isinstance(style, dict) else None,
+        "style": style,
         "aesthetics": AestheticConfig.from_dict(fx).to_dict() if isinstance(fx, dict) else None,
     }
 
@@ -649,7 +655,11 @@ def start_render(payload: dict = Body(...)):
     def run():
         job.status = "running"
         job.message = "Preparing video export..."
-        temp_clean_render = None
+        # Everything is written to scratch files first and only moved over the real output once
+        # the whole job succeeded, so a cancelled/failed render can't clobber an earlier export.
+        final_out = VIDEO_DIR / f"{song_name} - lyrics.mp4"
+        scratch_clean = VIDEO_DIR / f"{song_name} - lyrics.clean.part.mp4"
+        scratch_out = VIDEO_DIR / f"{song_name} - lyrics.part.mp4"
         try:
             style = CaptionStyle.from_dict(style_dict)
             aligned = json.loads(timings_path.read_text(encoding="utf-8"))
@@ -659,14 +669,8 @@ def start_render(payload: dict = Body(...)):
             final_ass = VIDEO_DIR / f"{song_name} - lyrics.ass"
             final_ass.write_text(ass_text, encoding="utf-8")
 
-            final_out = VIDEO_DIR / f"{song_name} - lyrics.mp4"
             ffmpeg = find_ffmpeg()
-
-            if lofi_mode:
-                temp_clean_render = VIDEO_DIR / f"{song_name} - lyrics_clean.mp4"
-                target_burn = temp_clean_render
-            else:
-                target_burn = final_out
+            target_burn = scratch_clean if lofi_mode else scratch_out
 
             def on_progress(k, v):
                 if k == "out_time_us":
@@ -695,14 +699,15 @@ def start_render(payload: dict = Body(...)):
                     job.message = msg
 
                 process_video_lofi(
-                    temp_clean_render,
-                    final_out,
+                    scratch_clean,
+                    scratch_out,
                     audio_source=video,
                     config=cfg,
                     on_progress=on_lofi_progress,
                     cancel_check=lambda: job.cancel_requested,
                 )
 
+            os.replace(scratch_out, final_out)
             job.status = "completed"
             job.progress = 100.0
             job.message = "Export completed!"
@@ -711,6 +716,9 @@ def start_render(payload: dict = Body(...)):
             job.status = "cancelled" if job.cancel_requested else "failed"
             job.error = str(e)
             job.message = f"Render failed: {e}"
+        finally:
+            for scratch in (scratch_clean, scratch_out):
+                scratch.unlink(missing_ok=True)
 
     executor.submit(run)
     return {"job_id": job.id}

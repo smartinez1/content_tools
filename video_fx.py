@@ -496,6 +496,8 @@ def apply_sidechain_zoom(frame: np.ndarray, scale: float) -> np.ndarray:
 
 
 _NOISE_POOL = 4
+_NOISE_DEFAULT_STRENGTH = 0.35
+_NOISE_BASE_SIGMA = 10.0 + 26.0 * _NOISE_DEFAULT_STRENGTH
 _NOISE_PAD = 64
 
 
@@ -582,7 +584,10 @@ def apply_fx_frame(
 
     # 7. Dynamic ISO noise
     if ctx.noise_pool is not None:
-        sigma = cfg.noise_gain * (10.0 + 26.0 * (cfg.noise_strength + high * cfg.noise_audio))
+        # Equals the original 10 + 26 * (strength + high * audio) at the default strength (0.35),
+        # but base grain now scales with the slider so 0 really means "no base grain".
+        base = _NOISE_BASE_SIGMA * cfg.noise_strength / _NOISE_DEFAULT_STRENGTH
+        sigma = cfg.noise_gain * (base + 26.0 * high * cfg.noise_audio)
         k = int(ctx.rng.integers(0, _NOISE_POOL))
         oy = int(ctx.rng.integers(0, _NOISE_PAD + 1))
         ox = int(ctx.rng.integers(0, _NOISE_PAD + 1))

@@ -17,3 +17,14 @@ Original findings and the implemented fixes (see git history for details):
 New features (planned in `~/.claude/plans/update-the-plan-so-crispy-lantern.md`):
 - Editable lyric lines (text / start / end, add / delete, auto-save with `.bak`).
 - Spec-driven FX knobs with per-effect sliders and an audio-reactivity block, a single-frame FX preview, and `{style, aesthetics}` presets with built-in FX looks.
+
+## Follow-up round (Playwright review of the PR)
+
+| # | Finding | Status |
+|---|---------|--------|
+| R-1 | Cancelling a render left `lyrics_clean.mp4` behind and could overwrite the previous export | Fixed: renders go to `*.part.mp4` scratch files, replaced atomically on success, removed in `finally` (tested) |
+| R-2 | `noise_strength = 0` still produced grain (fixed base term of 10) | Fixed: base grain scales with the slider; default output unchanged (tested) |
+| R-3 | Song without timings showed a stale "64 lines" | Fixed |
+| R-4 | Y position label read "Grid" | Fixed: Top / Middle / Bottom |
+| N-1 | No way to shift all captions in time | Added: global offset slider (per song, not part of presets) |
+| N-2 | Words could be cut mid-word when the column is narrow | Fixed: widen line, then shrink font, then hyphenate (`-`) as a last resort; live preview mirrors it |

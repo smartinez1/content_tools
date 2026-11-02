@@ -832,3 +832,8 @@ body {
 .fx-row input[type="range"] { width: 100%; }
 .fx-val { font-family: monospace; color: var(--text-main); }
 .fx-frame-bar { display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+
+/* Global subtitle offset */
+.offset-row { display: flex; gap: 6px; margin-top: 8px; }
+.offset-row .btn-secondary { flex: 1; width: auto; }
+.fine-print { margin: 8px 0 0; font-size: 11px; line-height: 1.4; color: var(--text-muted); }

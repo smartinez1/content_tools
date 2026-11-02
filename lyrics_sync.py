@@ -38,6 +38,7 @@ import sys
 import tempfile
 import unicodedata
 from dataclasses import asdict, dataclass
+from functools import lru_cache
 from pathlib import Path
 
 PROJECT_ROOT = Path(os.environ.get("LYRICS_PROJECT_ROOT", Path(__file__).resolve().parent.parent))
@@ -75,6 +76,7 @@ class CaptionStyle:
     lowercase: bool = True              # Grotesque emo aesthetic (all lowercase)
     text_opacity: float = 0.88          # Opacity (0.0 to 1.0; 0.88 = never 100% solid)
     opacity_trailing: bool = True       # Uneven trailing dissolve
+    time_offset: float = 0.0            # Seconds added to every line/word time (+ = later)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -391,6 +393,112 @@ def ass_escape(text: str) -> str:
     return text.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
 
 
+MIN_FIT_SCALE = 0.6      # a line is never shrunk below this fraction of the font size to keep a word whole
+MIN_SIDE_MARGIN = 30     # narrowest side margin (script px) a line may be widened to
+FIT_SAFETY = 1.03        # measured widths are padded by this much (renderer/font differences)
+_MEASURE_REF_SIZE = 100
+
+
+def shift_timings(lines, offset: float):
+    """Copies of ``lines`` moved by ``offset`` seconds; nothing starts before 0, lines that end up
+    entirely before 0 are dropped. The input is not modified."""
+    if not offset:
+        return lines
+
+    def mv(t):
+        return max(0.0, t + offset)
+
+    shifted = []
+    for line in lines:
+        if line["end"] + offset <= 0:
+            continue
+        new = dict(line, start=mv(line["start"]), end=mv(line["end"]))
+        new["words"] = [dict(w, start=mv(w["start"]), end=mv(w["end"])) for w in line.get("words", [])]
+        shifted.append(new)
+    return shifted
+
+
+@lru_cache(maxsize=32)
+def _reference_font(name: str, bold: bool, italic: bool):
+    """A PIL font for ``name`` found through fontconfig, or None when it can't be resolved."""
+    try:
+        from PIL import ImageFont
+
+        spec = name + (":bold" if bold else "") + (":italic" if italic else "")
+        out = subprocess.run(
+            ["fc-match", "-f", "%{file}\n%{index}", spec], capture_output=True, text=True, timeout=5
+        ).stdout.split("\n")
+        if not out or not out[0].strip():
+            return None
+        index = int(out[1]) & 0xFFFF if len(out) > 1 and out[1].strip().isdigit() else 0
+        return ImageFont.truetype(out[0].strip(), _MEASURE_REF_SIZE, index=index)
+    except Exception:
+        return None
+
+
+def make_measurer(st: CaptionStyle):
+    """``measure(text, font_size) -> width in script px``. Uses the real font when fontconfig and
+    Pillow can find it, otherwise an average-glyph-width estimate (slightly pessimistic)."""
+    font = _reference_font(st.font_name, st.bold, st.italic)
+
+    def measure(text: str, size: float) -> float:
+        if font is not None:
+            width = font.getlength(text) * size / _MEASURE_REF_SIZE
+        else:
+            width = len(text) * size * (0.6 if st.bold else 0.55)
+        return width + st.letter_spacing * len(text)
+
+    return measure
+
+
+def split_word(word: str, size: float, max_width: float, measure) -> list[str]:
+    """Break ``word`` into chunks that each fit ``max_width``; every chunk but the last ends in '-'."""
+    chunks = []
+    rest = word
+    while len(rest) > 2 and measure(rest, size) > max_width:
+        n = len(rest) - 1
+        while n > 1 and measure(rest[:n] + "-", size) > max_width:
+            n -= 1
+        chunks.append(rest[:n] + "-")
+        rest = rest[n:]
+    chunks.append(rest)
+    return chunks
+
+
+def plan_line_fit(words, font_size, width, margin_l, margin_r, measure) -> dict:
+    """Keep every word of a line whole instead of letting the renderer cut it mid-word.
+
+    A word is only cut when it is wider than the text column. In order of preference this
+    1) widens the column for that line (down to ``MIN_SIDE_MARGIN``), 2) shrinks the font (down to
+    ``MIN_FIT_SCALE``), 3) as a last resort splits the word with a trailing '-'.
+
+    Returns ``{"margins": (l, r) | None, "font_size": int | None, "chunks": {word index: [str, ...]}}``;
+    empty/None values mean "leave the line alone".
+    """
+    plan = {"margins": None, "font_size": None, "chunks": {}}
+    widths = [measure(w, font_size) * FIT_SAFETY for w in words]
+    widest = max(widths, default=0.0)
+    if widest <= width - margin_l - margin_r:
+        return plan
+
+    max_avail = width - 2 * MIN_SIDE_MARGIN
+    if widest <= max_avail:  # 1) widen
+        side = max(MIN_SIDE_MARGIN, int((width - widest) // 2))
+        plan["margins"] = (min(margin_l, side), min(margin_r, side))
+        return plan
+
+    plan["margins"] = (MIN_SIDE_MARGIN, MIN_SIDE_MARGIN)
+    scale = max_avail / widest
+    if scale >= MIN_FIT_SCALE:  # 2) shrink
+        plan["font_size"] = max(1, int(font_size * scale * 0.98))
+        return plan
+
+    for i, (word, w) in enumerate(zip(words, widths)):  # 3) hyphenate what still can't fit
+        if w > max_avail:
+            plan["chunks"][i] = split_word(word, font_size, max_avail / FIT_SAFETY, measure)
+    return plan
+
+
 def build_ass(
     lines,
     duration: float,
@@ -409,6 +517,9 @@ def build_ass(
         st.font_size = fontsize
     if margin_v is not None:
         st.margin_v = margin_v
+
+    lines = shift_timings(lines, st.time_offset)
+    measure = make_measurer(st)
 
     # First pass: decide how long each line stays on screen.
     events = []
@@ -480,9 +591,21 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             target_scale = int(round(100 + st.pop_scale))
             line_tags.append(f"\\t(0,180,\\fscx{target_scale}\\fscy{target_scale})\\t(180,360,\\fscx100\\fscy100)")
 
+        use_karaoke = bool(words and st.karaoke)
+        if use_karaoke:
+            tokens = [w["text"].lower() if st.lowercase else w["text"] for w in words]
+        else:
+            raw_text = line["text"].lower() if st.lowercase else line["text"]
+            tokens = raw_text.split()
+        plan = plan_line_fit(tokens, st.font_size, width, margin_l, margin_r, measure)
+        if plan["font_size"]:
+            line_tags.append(f"\\fs{plan['font_size']}")
+        ev_l, ev_r = plan["margins"] or (0, 0)  # 0 = use the style's margins
+        chunks = plan["chunks"]
+
         parts = [f"{{{ ''.join(line_tags) }}}"] if line_tags else []
 
-        if words and st.karaoke:
+        if use_karaoke:
             gap = words[0]["start"] - start
             if gap > 0.005:
                 parts.append("{%s%d}" % (tag_prefix, round(gap * 100)))
@@ -493,21 +616,33 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     gap = word["start"] - previous_end
                     if gap > 0.005:
                         parts.append("{%s%d}" % (tag_prefix, round(gap * 100)))
-                duration_cs = max(1, round((word["end"] - word["start"]) * 100))
                 prefix = "" if j == 0 else " "
-                w_text = word["text"].lower() if st.lowercase else word["text"]
-                parts.append("{%s%d}%s%s" % (tag_prefix, duration_cs, prefix, ass_escape(w_text)))
+                pieces = chunks.get(j, [tokens[j]])
+                total_chars = sum(len(c.rstrip("-")) if k < len(pieces) - 1 else len(c)
+                                  for k, c in enumerate(pieces)) or 1
+                word_cs = max(1, round((word["end"] - word["start"]) * 100))
+                for k, piece in enumerate(pieces):
+                    last = k == len(pieces) - 1
+                    share = len(piece) if last else len(piece.rstrip("-"))
+                    duration_cs = max(1, round(word_cs * share / total_chars))
+                    tail = "" if last else "\\N"
+                    parts.append("{%s%d}%s%s%s" % (
+                        tag_prefix, duration_cs, prefix if k == 0 else "", ass_escape(piece), tail))
                 previous_end = word["end"]
 
             remaining = end - previous_end
             if remaining > 0.005:
                 parts.append("{%s%d}" % (tag_prefix, round(remaining * 100)))
         else:
-            raw_text = line["text"].lower() if st.lowercase else line["text"]
-            parts.append(ass_escape(raw_text))
+            if chunks:
+                text = " ".join("\\N".join(ass_escape(c) for c in chunks.get(i, [t]))
+                                for i, t in enumerate(tokens))
+            else:
+                text = ass_escape(raw_text)
+            parts.append(text)
 
         dialogues.append(
-            f"Dialogue: 0,{ass_time(start)},{ass_time(end)},Lyrics,,0,0,0,,{''.join(parts)}"
+            f"Dialogue: 0,{ass_time(start)},{ass_time(end)},Lyrics,,{ev_l},{ev_r},0,,{''.join(parts)}"
         )
 
     return header + "\n".join(dialogues) + "\n"
