@@ -18,7 +18,6 @@ from snippets import (
     _audio_filter,
     apply_transitions,
     build_end_card,
-    crop_logo,
     render_snippet,
     sync_to_beats,
 )
@@ -80,14 +79,6 @@ class TestTransitions(unittest.TestCase):
 
 
 class TestEndCard(unittest.TestCase):
-    def test_crop_finds_the_bright_lettering(self):
-        img = np.full((100, 400, 3), 12, dtype=np.uint8)
-        img[40:60, 250:350] = 240
-        crop = crop_logo(img)
-        self.assertLess(crop.shape[1], 140)
-        self.assertLess(crop.shape[0], 40)
-        self.assertGreater(crop.mean(), img.mean())
-
     def test_card_has_logo_and_text(self):
         with tempfile.TemporaryDirectory() as tmp:
             logo = Path(tmp) / "logo.png"
@@ -99,8 +90,8 @@ class TestEndCard(unittest.TestCase):
         bright = card.max(axis=2) > 120
         rows = np.nonzero(bright.any(axis=1))[0]
         self.assertGreater(len(rows), 20)
-        # the logo's own dark background is keyed out: corners stay black
-        self.assertLess(int(card[:40, :40].max()), 10)
+        # the file is used as given: the card takes its backdrop colour, no visible box
+        self.assertTrue(np.all(np.abs(card[:40, :40].astype(int) - 20) < 8))
 
     def test_card_without_logo_still_shows_text(self):
         card = build_end_card(540, 960, None, "20.11.2026")
@@ -150,6 +141,18 @@ class TestBeatSync(unittest.TestCase):
         self.assertEqual(f.count("curve=qsin"), 2)
         self.assertIn("lowpass=f=", f)
         self.assertIn("st=9.500", f)  # 1.5 s fade-out ending with the card
+
+
+    def test_beats_that_stop_short_do_not_drag_the_end_back(self):
+        out = sync_to_beats(Path("x.mp4"), SnippetConfig(start=1.2, end=50.0), self.BEATS[:40])
+        self.assertEqual(out.end, 50.0)  # last beat is at 19.5 s: too far, left alone
+
+    def test_audio_filter_for_a_late_window_never_has_negative_durations(self):
+        cfg = SnippetConfig(start=0, end=60)
+        for offset in (0.0, 58.4, 61.0):
+            f = _audio_filter(cfg, cfg.total_duration, offset)
+            self.assertNotIn("d=-", f)
+            self.assertNotIn("st=-", f)
 
 
 class TestRender(unittest.TestCase):

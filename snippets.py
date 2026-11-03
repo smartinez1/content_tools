@@ -205,31 +205,18 @@ def apply_transitions(frame: np.ndarray, names, p: float, rng: np.random.Generat
 # End card
 # ---------------------------------------------------------------------------
 
-def crop_logo(img: np.ndarray, threshold: int = 70, pad_ratio: float = 0.04) -> np.ndarray:
-    """Crop to the bright content (the lettering), dropping the empty dark field around it."""
-    grey = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    mask = (grey > threshold).astype(np.uint8)
-    # ignore isolated bright specks (film grain) so they don't stretch the box
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
-    ys, xs = np.nonzero(mask)
-    if len(xs) == 0:
-        return img
-    h, w = grey.shape
-    pad = int(round(pad_ratio * max(xs.max() - xs.min(), ys.max() - ys.min())))
-    x0, x1 = max(0, xs.min() - pad), min(w, xs.max() + pad + 1)
-    y0, y1 = max(0, ys.min() - pad), min(h, ys.max() + pad + 1)
-    return img[y0:y1, x0:x1]
+def logo_background(img: np.ndarray) -> np.ndarray:
+    """The logo file's own backdrop colour (median of its border), so the card can match it."""
+    border = np.concatenate([img[:8].reshape(-1, 3), img[-8:].reshape(-1, 3),
+                             img[:, :8].reshape(-1, 3), img[:, -8:].reshape(-1, 3)])
+    return np.median(border, axis=0).astype(np.uint8)
 
 
-def key_logo_background(img: np.ndarray) -> np.ndarray:
-    """Map the logo's own dark (textured, not pure black) background to black, so the logo sits on
-    the card without a visible rectangle. Levels: the background's typical brightness -> 0."""
-    grey = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    bg = float(np.percentile(grey, 60))  # most of the crop is background
-    if bg <= 1:
-        return img
-    out = (img.astype(np.float32) - bg * 1.15) * (255.0 / max(1.0, 255.0 - bg * 1.15))
-    return np.clip(out, 0, 255).astype(np.uint8)
+def _edge_feather(h: int, w: int, px: int) -> np.ndarray:
+    """0 at the borders rising to 1 inside, to melt the picture into the card without a seam."""
+    ramp_y = np.clip(np.arange(h) / max(1, px), 0, 1) * np.clip(np.arange(h)[::-1] / max(1, px), 0, 1)
+    ramp_x = np.clip(np.arange(w) / max(1, px), 0, 1) * np.clip(np.arange(w)[::-1] / max(1, px), 0, 1)
+    return (ramp_y[:, None] * ramp_x[None, :])[..., None].astype(np.float32)
 
 
 def _date_font(size: int):
@@ -269,7 +256,7 @@ def render_text_layer(width: int, height: int, text: str, size: int, spacing: fl
 
 
 def build_end_card(width: int, height: int, logo_path: Path | None, text: str) -> np.ndarray:
-    """The static end card: the cropped logo with the release text under it, in the logo's
+    """The static end card: the logo file as given with the release text under it, in the logo's
     CRT style (glow, RGB fringe, scanlines). Per-frame grain/flicker is added by ``card_frame``."""
     card = np.zeros((height, width, 3), dtype=np.uint8)
     logo_bottom = int(height * 0.5)
@@ -277,13 +264,16 @@ def build_end_card(width: int, height: int, logo_path: Path | None, text: str) -
     if logo_path is not None and Path(logo_path).exists():
         logo = cv2.imread(str(logo_path), cv2.IMREAD_COLOR)
         if logo is not None:
-            logo = key_logo_background(crop_logo(logo))
-            lw = int(width * 0.8)
+            # The file exactly as given (uncropped, unkeyed, full width). The card takes the
+            # file's own backdrop colour so the picture has no visible edge.
+            card[:] = logo_background(logo)
+            lw = width
             lh = max(1, int(round(logo.shape[0] * lw / logo.shape[1])))
             logo = cv2.resize(logo, (lw, lh), interpolation=cv2.INTER_AREA)
-            x = (width - lw) // 2
             y = int(height * 0.46) - lh // 2
-            card[y:y + lh, x:x + lw] = logo
+            mask = _edge_feather(lh, lw, max(4, lh // 12))
+            region = card[y:y + lh].astype(np.float32)
+            card[y:y + lh] = (region + (logo.astype(np.float32) - region) * mask).astype(np.uint8)
             logo_bottom = y + lh
             text_size = max(12, int(lh * 0.22))
     if text:
@@ -393,7 +383,9 @@ def sync_to_beats(video: Path, cfg: SnippetConfig, beats: np.ndarray | None = No
         return cfg
 
     def snap(x):
-        return float(beats[np.argmin(np.abs(beats - x))])
+        nearest = float(beats[np.argmin(np.abs(beats - x))])
+        # beats that stop short of the point (detection gave up) must not drag it far away
+        return nearest if abs(nearest - x) <= period else x
 
     start, end = snap(cfg.start), snap(cfg.end)
     if end - start < period:  # keep at least one beat
@@ -423,17 +415,23 @@ def _lowpass_stages(start: float, length: float, stages: int = 5) -> str:
     return ",".join(out)
 
 
-def _audio_filter(cfg: SnippetConfig, total: float) -> str:
-    """Soft audio ending: the fade-out is curved and also closes a low-pass (the music "sinks")."""
+def _audio_filter(cfg: SnippetConfig, total: float, offset: float = 0.0) -> str:
+    """Soft audio ending: the fade-out is curved and also closes a low-pass (the music "sinks").
+
+    ``offset`` > 0 means the audio input was already cut to start that many seconds into the
+    snippet (partial renders), so every moment is shifted by it.
+    """
     parts = []
-    if cfg.fade_in:
+    if cfg.fade_in and offset <= 0:
         parts.append(f"afade=t=in:st=0:d={cfg.fade_in_seconds:.3f}:curve=qsin")
     if cfg.music_under_card:
-        d = min(cfg.music_fade_out, total)
+        d = max(0.1, min(cfg.music_fade_out, total - offset))
         st = max(0.0, total - d)
     else:
-        d = cfg.transition_duration if cfg.transitions else 0.3
+        d = max(0.1, cfg.transition_duration if cfg.transitions else 0.3)
         st = max(0.0, cfg.clip_duration - d)
+    st = max(0.0, st - offset)
+    total -= offset
     parts.append(_lowpass_stages(st, d))
     parts.append(f"afade=t=out:st={st:.3f}:d={d:.3f}:curve=qsin")
     # keep the audio exactly as long as the video (silence under the card if the source ends)
@@ -450,7 +448,8 @@ def render_snippet(
     cancel_check=None,
     window: tuple[float, float] | None = None,
     max_width: int | None = None,
-    preset: str = "fast",
+    preset: str = "medium",
+    crf: int = 16,
 ) -> Path:
     """Render the snippet (clip + transition + end card) to ``output``.
 
@@ -484,20 +483,19 @@ def render_snippet(
     scratch = output.with_name(output.stem + ".part" + output.suffix)
     tmp = Path(tempfile.mkdtemp(prefix="snippet_"))
     log_path = tmp / "ffmpeg.log"
-    # The fades are defined on the whole snippet timeline; for a partial window read the audio
-    # from the snippet start and trim afterwards so they land at the same moments.
-    afilter = _audio_filter(cfg, total)
-    if w0 > 0:
-        afilter += f",atrim=start={w0:.3f},asetpts=PTS-STARTPTS"
+    # The fades are defined on the whole snippet timeline; a partial window seeks the audio
+    # straight to its start and shifts them (decoding the unused lead-in is slow and, on long
+    # clips, made ffmpeg fail with "Result too large").
+    afilter = _audio_filter(cfg, total, w0)
     cmd = [
         ffmpeg, "-hide_banner", "-v", "error", "-y",
         "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{width}x{height}", "-framerate", f"{fps}",
         "-i", "-",
-        "-ss", f"{cfg.start:.3f}", "-t", f"{w1:.3f}", "-i", str(video),
+        "-ss", f"{cfg.start + w0:.3f}", "-t", f"{w1 - w0:.3f}", "-i", str(video),
         "-map", "0:v:0", "-map", "1:a:0?",
         "-af", afilter,
-        "-c:v", "libx264", "-preset", preset, "-crf", "21", "-maxrate", "10M", "-bufsize", "20M",
-        "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
+        "-c:v", "libx264", "-preset", preset, "-crf", str(crf),
+        "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "256k",
         "-t", f"{w1 - w0:.3f}", "-movflags", "+faststart", "-f", "mp4",
         str(scratch),
     ]
