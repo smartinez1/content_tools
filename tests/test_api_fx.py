@@ -1,5 +1,6 @@
 """API tests for the FX knob schema, style+FX presets and the single-frame FX preview."""
 
+import io
 import json
 import subprocess
 import sys
@@ -19,6 +20,25 @@ try:
     from video_fx import AestheticConfig, find_ffmpeg
 except Exception:  # fastapi/httpx or heavy deps not installed
     TestClient = None
+
+
+@unittest.skipIf(TestClient is None, "fastapi test client not available")
+class TestAlignValidation(unittest.TestCase):
+    def test_missing_video_is_reported_up_front_and_precisely(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "lyrics").mkdir()
+            (root / "lyrics" / "song.txt").write_text("[Verse]\nhola\n", encoding="utf-8")
+            with mock.patch.object(lyrics_sync_ui, "VIDEO_DIR", root / "sm_content"), \
+                    mock.patch.object(lyrics_sync_ui, "LYRICS_DIR", root / "lyrics"), \
+                    mock.patch.object(lyrics_sync_ui, "AUDIO_DIR", root / "wav_files"), \
+                    mock.patch.object(lyrics_sync_ui, "PROJECT_ROOT", root):
+                res = TestClient(lyrics_sync_ui.app).post("/api/align", json={"song_name": "song"})
+        self.assertEqual(res.status_code, 422)
+        detail = res.json()["detail"]
+        self.assertIn("source video not found", detail)
+        self.assertIn("Compose.mp4", detail)
+        self.assertNotIn("lyrics file not found", detail)
 
 
 @unittest.skipIf(TestClient is None, "fastapi test client not available")
@@ -194,6 +214,26 @@ class TestFxFrameEndpoint(unittest.TestCase):
         res = self.client.post("/api/fx-frame", json={"song_name": "nope", "time_sec": 0})
         self.assertEqual(res.status_code, 404)
         res = self.client.post("/api/fx-frame", json={"song_name": "song", "time_sec": "abc"})
+        self.assertEqual(res.status_code, 400)
+
+    def test_clip_is_a_small_animation(self):
+        from PIL import Image
+
+        res = self.client.post(
+            "/api/fx-clip", json={"song_name": "song", "time_sec": 0.5, "duration": 1.0, "aesthetics": {}}
+        )
+        self.assertEqual(res.status_code, 200, res.text)
+        self.assertIn(res.headers["content-type"], {"image/webp", "image/gif"})
+        anim = Image.open(io.BytesIO(res.content))
+        self.assertGreaterEqual(anim.n_frames, 8)
+        self.assertLessEqual(anim.size[0], 270)
+        self.assertLess(len(res.content), 2_000_000)
+
+    def test_clip_errors_name_the_missing_file(self):
+        res = self.client.post("/api/fx-clip", json={"song_name": "nope"})
+        self.assertEqual(res.status_code, 404)
+        self.assertIn("Compose.mp4", res.json()["detail"])
+        res = self.client.post("/api/fx-clip", json={"song_name": "song", "duration": "x"})
         self.assertEqual(res.status_code, 400)
 
 

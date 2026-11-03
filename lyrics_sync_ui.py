@@ -2,6 +2,7 @@
 """Local FastAPI web UI for lyrics synchronization, subtitle styling, and video rendering."""
 
 import argparse
+import io
 import json
 import math
 import os
@@ -40,7 +41,13 @@ from lyrics_sync import (
     parse_lyrics,
     render,
 )
-from video_fx import AestheticConfig, aesthetic_schema, process_video_lofi, render_fx_frame
+from video_fx import (
+    AestheticConfig,
+    aesthetic_schema,
+    process_video_lofi,
+    render_fx_clip,
+    render_fx_frame,
+)
 
 app = FastAPI(title="content_tools - Lyrics & Subtitles Studio")
 app.add_middleware(
@@ -304,6 +311,42 @@ def fx_frame(payload: dict = Body(...)):
     if not ok:
         raise HTTPException(status_code=500, detail="Failed to encode frame")
     return Response(content=buf.tobytes(), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/fx-clip")
+def fx_clip(payload: dict = Body(...)):
+    """A short, low-resolution animation (WebP, or GIF as a fallback) of the Lo-Fi stack so audio-reactive effects are visible."""
+    song_name = payload.get("song_name")
+    video = find_closest(VIDEO_DIR, song_name or "", {".mp4", ".mov"}, exclude=(" - lyrics", "_lyrics"))
+    if not video:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No source video for '{song_name}'. Put '<song> - Compose.mp4' in {VIDEO_DIR}.",
+        )
+    try:
+        start = float(payload.get("time_sec", 0.0))
+        duration = float(payload.get("duration", 1.0))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="time_sec and duration must be numbers")
+    cfg = AestheticConfig.from_dict(payload.get("aesthetics") or {})
+    try:
+        with _FX_FRAME_SLOTS:
+            frames = render_fx_clip(video, start, min(max(duration, 0.2), 3.0), cfg)
+    except RuntimeError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    from PIL import Image, features
+
+    images = [Image.fromarray(cv2.cvtColor(f, cv2.COLOR_BGR2RGB)) for f in frames]
+    frame_ms = max(20, int(round(1000.0 * min(max(duration, 0.2), 3.0) / len(frames))))
+    buf = io.BytesIO()
+    # Animated WebP is ~10x smaller than GIF for grainy footage and every current browser plays it
+    # in an <img>; fall back to GIF only if this Pillow build lacks WebP.
+    if features.check("webp"):
+        fmt, mime, opts = "WEBP", "image/webp", {"quality": 60}
+    else:
+        fmt, mime, opts = "GIF", "image/gif", {"optimize": False}
+    images[0].save(buf, format=fmt, save_all=True, append_images=images[1:], duration=frame_ms, loop=0, **opts)
+    return Response(content=buf.getvalue(), media_type=mime, headers={"Cache-Control": "no-store"})
 
 
 def _normalise_preset(raw) -> dict:
@@ -585,6 +628,20 @@ def start_align(payload: dict = Body(...)):
     if not song_name:
         raise HTTPException(status_code=400, detail="song_name required")
 
+    # Check everything up front so the user gets a precise message instead of a failed job.
+    video = find_closest(VIDEO_DIR, song_name, {".mp4", ".mov"}, exclude=(" - lyrics", "_lyrics"))
+    lyrics_path = find_closest(LYRICS_DIR, song_name, {".txt"}) or find_closest(PROJECT_ROOT, song_name, {".txt"})
+    wav = find_closest(AUDIO_DIR, song_name, {".wav"})
+    problems = []
+    if not lyrics_path:
+        problems.append(f"lyrics file not found (expected '{song_name}.txt' in {LYRICS_DIR})")
+    if not video:
+        problems.append(f"source video not found (expected '{song_name} - Compose.mp4' in {VIDEO_DIR})")
+    if not video and not wav:
+        problems.append(f"no audio to align either (expected '{song_name}.wav' in {AUDIO_DIR})")
+    if problems:
+        raise HTTPException(status_code=422, detail="Cannot align '" + song_name + "': " + "; ".join(problems) + ".")
+
     job = Job("align", song_name)
     with jobs_lock:
         jobs[job.id] = job
@@ -593,16 +650,13 @@ def start_align(payload: dict = Body(...)):
         job.status = "running"
         job.message = "Loading audio & Whisper model..."
         try:
-            video = find_closest(VIDEO_DIR, song_name, {".mp4", ".mov"}, exclude=(" - lyrics", "_lyrics"))
-            lyrics_path = find_closest(LYRICS_DIR, song_name, {".txt"}) or find_closest(PROJECT_ROOT, song_name, {".txt"})
-            if not video or not lyrics_path:
-                raise RuntimeError(f"Missing video or lyrics for {song_name}")
-
             lines = parse_lyrics(lyrics_path)
+            if not lines:
+                raise RuntimeError(
+                    f"'{lyrics_path.name}' has no lyric lines. Lines must be under a [Section] header."
+                )
             audio = video
-            # If explicit wav or no audio in video, fallback
-            if not has_audio(video):
-                wav = find_closest(AUDIO_DIR, song_name, {".wav"})
+            if not video or not has_audio(video):
                 if not wav:
                     raise RuntimeError("Video has no audio and no WAV master found.")
                 audio = wav

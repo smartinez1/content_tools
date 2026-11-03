@@ -897,3 +897,61 @@ def render_fx_frame(
     rng = np.random.default_rng(cfg.seed if cfg.seed >= 0 else 0)
     ctx = build_fx_context(cfg, height, width, rng)
     return apply_fx_frame(frame, ctx, low[idx], mid[idx], high[idx])
+
+
+def render_fx_clip(
+    video: Path,
+    start_sec: float,
+    duration: float = 1.0,
+    config: AestheticConfig | None = None,
+    fps: float = 12.0,
+    max_width: int = 270,
+    window: float = 10.0,
+) -> list[np.ndarray]:
+    """Return a few consecutive frames with the effect stack applied, for a short animated preview.
+
+    The effects run at full resolution (their pixel sizes depend on it) and each frame is then
+    shrunk to ``max_width``. Audio envelopes come from a ``window``-second slice around the clip, so
+    sound-reactive effects (zoom pumps, glitches, bass pulses) behave as they would in a render.
+    """
+    cfg = config or AestheticConfig()
+    cap = cv2.VideoCapture(str(video))
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open video {video}")
+    try:
+        src_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        total = (int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1) / src_fps
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        duration = min(max(float(duration), 0.2), max(total, 0.2))
+        start_sec = min(max(float(start_sec), 0.0), max(total - duration, 0.0))
+        fps = max(2.0, min(float(fps), src_fps))
+        n_out = max(1, int(round(duration * fps)))
+
+        # Audio is analysed over a wider window so the percentile normalisation resembles a full render.
+        a_start = max(0.0, start_sec + duration / 2.0 - window / 2.0)
+        a_dur = max(min(window, total - a_start), duration)
+        a_frames = max(1, int(a_dur * fps))
+        with tempfile.TemporaryDirectory(prefix="lofi_clip_") as tmp:
+            low, mid, high = audio_curves(video, a_start, a_dur, a_frames, cfg, fps, Path(tmp))
+        offset = int(round((start_sec - a_start) * fps))
+
+        rng = np.random.default_rng(cfg.seed if cfg.seed >= 0 else 0)
+        ctx = build_fx_context(cfg, height, width, rng)
+        scale = min(1.0, max_width / float(width))
+        size = (max(2, int(width * scale)), max(2, int(height * scale)))
+
+        frames: list[np.ndarray] = []
+        for i in range(n_out):
+            cap.set(cv2.CAP_PROP_POS_MSEC, (start_sec + i / fps) * 1000.0)
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                break
+            j = min(max(offset + i, 0), a_frames - 1)
+            fx = apply_fx_frame(frame, ctx, low[j], mid[j], high[j])
+            frames.append(cv2.resize(fx, size, interpolation=cv2.INTER_AREA))
+        if not frames:
+            raise RuntimeError(f"Cannot read frames at {start_sec:.2f}s")
+        return frames
+    finally:
+        cap.release()

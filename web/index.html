@@ -31,9 +31,8 @@
     <section class="stage-pane">
       <div class="video-container" id="videoContainer">
         <video id="mainVideo" playsinline preload="auto"></video>
-        <!-- Real-time CSS approximation layers for Lo-Fi aesthetic -->
-        <div id="lofiScanlinesLayer" class="lofi-scanlines-layer active"></div>
-        <div id="lofiFogLayer" class="lofi-fog-layer active"></div>
+        <!-- Server-rendered frame / clip with the Lo-Fi effects applied, laid exactly over the video -->
+        <img id="stageFx" class="stage-fx" alt="Frame with Lo-Fi effects applied" hidden>
         
         <!-- Interactive draggable subtitle overlay -->
         <div id="subOverlay" class="subtitle-overlay" title="Drag to adjust position">
@@ -43,7 +42,7 @@
       </div>
 
       <div class="transport-controls">
-        <button id="btnPlay" class="btn-transport">▶ Play</button>
+        <span class="time-label">Frame</span>
         <span id="timeDisplay" class="time-readout">00:00 / 00:00</span>
         <input type="range" id="timelineSlider" class="timeline-slider" min="0" max="100" step="0.05" value="0">
       </div>
@@ -58,15 +57,6 @@
           </div>
           <video id="previewVideo" controls playsinline preload="auto"></video>
         </div>
-      </div>
-
-      <!-- Single-frame FX preview: floating and NON-modal so the FX sliders stay usable while it updates -->
-      <div id="fxFramePanel" class="float-panel" hidden>
-        <div class="panel-header">
-          <h3>FX frame <span id="fxFrameStatus" class="lines-meta"></span></h3>
-          <button id="btnCloseFxFrame" class="btn-secondary">Close</button>
-        </div>
-        <img id="fxFrameImg" alt="Frame with Lo-Fi effects applied">
       </div>
 
       <!-- Clickable Line Timeline -->
@@ -251,15 +241,18 @@
             <input type="checkbox" id="lofiMasterToggle" checked> Active
           </label>
         </div>
-        <p class="fx-note">Each effect has its own controls. The live player mirrors scanlines, fog, wash and
-          chromatic shift; zoom, glitch, noise and frame rate only show in a rendered preview or the
-          single-frame preview below.</p>
+        <p class="fx-note">Pick a frame with the slider, then tune the effects: the frame above is re-rendered
+          with the real effect stack when you release a control. Sound-reactive effects (zoom pump,
+          glitch, bass pulse) need motion, so use the short clip button to see them.</p>
         <div id="fxControls" class="fx-controls">
           <div class="placeholder-msg">Loading effects...</div>
         </div>
         <div class="fx-frame-bar">
-          <button id="btnFxFrame" class="btn-secondary">🔍 Preview FX on current frame</button>
-          <label class="switch-label"><input type="checkbox" id="fxAutoRefresh"> Auto-refresh</label>
+          <button id="btnFxFrame" class="btn-secondary">🔍 FX on this frame</button>
+          <button id="btnFxClip" class="btn-secondary" title="About one second, low resolution, with the audio-driven effects">🎞 FX clip (1 s)</button>
+          <button id="btnFxOriginal" class="btn-secondary">Original</button>
+          <label class="switch-label"><input type="checkbox" id="fxAutoRefresh" checked> Auto-refresh</label>
+          <span id="fxFrameStatus" class="lines-meta"></span>
           <button id="btnFxResetAll" class="btn-secondary">Reset all</button>
         </div>
       </div>
