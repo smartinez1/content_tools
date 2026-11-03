@@ -783,3 +783,50 @@ body {
 .title-actions { display: inline-flex; gap: 6px; }
 .btn-tiny:disabled { opacity: 0.4; cursor: not-allowed; }
 .btn-tiny.danger:not(:disabled):hover { color: var(--accent-danger); border-color: var(--accent-danger); }
+
+/* ---- Tabs ---- */
+.tab-bar { display: flex; gap: 4px; background: var(--bg-input); padding: 3px; border-radius: 8px; }
+.tab-btn {
+  background: transparent; color: var(--text-muted); border: none; padding: 6px 14px;
+  border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer;
+}
+.tab-btn.active { background: var(--bg-card); color: var(--text-main); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4); }
+.studio-layout[hidden], .song-bar[hidden] { display: none; }
+
+/* ---- Snippets ---- */
+.snip-stage { pointer-events: auto; min-height: 240px; }
+.snip-stage video { max-width: 100%; max-height: 100%; }
+.snip-frame { position: absolute; inset: 0; margin: auto; max-width: 100%; max-height: 100%; cursor: pointer; }
+.snip-frame[hidden] { display: none; }
+.snip-range-card {
+  background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 8px;
+  padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; flex-shrink: 0;
+}
+.snip-strip { position: relative; height: 18px; background: var(--bg-input); border-radius: 4px; cursor: pointer; }
+.snip-strip-sel {
+  position: absolute; top: 0; bottom: 0; background: rgba(245, 158, 11, 0.45);
+  border-left: 2px solid var(--accent-primary); border-right: 2px solid var(--accent-primary);
+}
+.snip-strip-head { position: absolute; top: -3px; bottom: -3px; width: 2px; background: #fff; }
+.snip-range-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.snip-time { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--text-muted); }
+.snip-time label { min-width: 34px; }
+.snip-time input {
+  width: 84px; background: var(--bg-input); color: var(--text-main); border: 1px solid var(--border-color);
+  border-radius: 4px; padding: 4px 6px; font-family: monospace; font-size: 12px;
+}
+.snip-range-row .btn-secondary { width: auto; }
+.full-select, .text-input {
+  width: 100%; background: var(--bg-input); color: var(--text-main); border: 1px solid var(--border-color);
+  padding: 6px 10px; border-radius: 6px; font-size: 13px;
+}
+.chip-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.chip {
+  background: var(--bg-input); color: var(--text-muted); border: 1px solid var(--border-color);
+  padding: 5px 10px; border-radius: 999px; font-size: 12px; cursor: pointer;
+}
+.chip.on { background: rgba(245, 158, 11, 0.18); border-color: var(--accent-primary); color: var(--text-main); }
+.snip-list { display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+.snip-item { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+.snip-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.snip-item a { color: var(--accent-secondary); margin-left: 6px; }
