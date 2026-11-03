@@ -14,6 +14,7 @@ import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from urllib.parse import quote
 
 import cv2
 import uvicorn
@@ -40,6 +41,14 @@ from lyrics_sync import (
     normalise_timings,
     parse_lyrics,
     render,
+)
+from snippets import (
+    MAX_SNIPPET_SECONDS,
+    TRANSITION_LABELS,
+    TRANSITIONS,
+    SnippetConfig,
+    render_snippet,
+    render_snippet_frame,
 )
 from video_fx import (
     AestheticConfig,
@@ -69,6 +78,8 @@ PREVIEWS_DIR.mkdir(parents=True, exist_ok=True)
 CONFIG_DIR = PROJECT_ROOT / ".lyrics_sync"
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 PRESETS_FILE = CONFIG_DIR / "presets.json"
+# End-card logo for snippets (override with --logo)
+LOGO_FILE = PROJECT_ROOT / "gemini_gens" / "Gemini_Generated_Image_e6vvqpe6vvqpe6vv.jpeg"
 
 
 def get_project_root() -> Path:
@@ -895,6 +906,190 @@ if WEB_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
 
 
+# ---------------------------------------------------------------------------
+# Snippets: short promo cuts of the rendered "<song> - lyrics.mp4" with a transition + end card
+# ---------------------------------------------------------------------------
+
+SNIPPET_SUFFIX = " - lyrics.mp4"
+
+
+def _snippets_dir() -> Path:
+    return VIDEO_DIR / "snippets"
+
+
+def _snippet_source(song_name: str) -> Path | None:
+    """The rendered video for ``song_name``: exact file name, no fuzzy matching (it is picked
+    from the list /api/snippet-sources returned)."""
+    if not song_name or "/" in song_name or "\\" in song_name:
+        return None
+    path = VIDEO_DIR / f"{song_name}{SNIPPET_SUFFIX}"
+    return path if path.is_file() else None
+
+
+def _fmt_stamp(t: float) -> str:
+    return f"{int(t // 60):02d}m{t % 60:05.2f}s"
+
+
+def _snippet_request(payload: dict) -> tuple[Path, SnippetConfig, float]:
+    """Validate a snippet request up front, so problems come back as a precise 4xx message."""
+    song = payload.get("song_name") or ""
+    video = _snippet_source(song)
+    if not video:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No rendered video for '{song}'. Render it first (expected '{song}{SNIPPET_SUFFIX}' "
+                   f"in {VIDEO_DIR}).",
+        )
+    cfg = SnippetConfig.from_dict(payload.get("config") or {})
+    duration = get_duration(video)
+    if cfg.end <= cfg.start:
+        raise HTTPException(status_code=422, detail="The end time must be after the start time.")
+    if cfg.start >= duration:
+        raise HTTPException(
+            status_code=422, detail=f"Start {cfg.start:.2f}s is past the end of the video ({duration:.2f}s)."
+        )
+    if cfg.end > duration + 0.05:
+        raise HTTPException(
+            status_code=422, detail=f"End {cfg.end:.2f}s is past the end of the video ({duration:.2f}s)."
+        )
+    if cfg.clip_duration > MAX_SNIPPET_SECONDS:
+        raise HTTPException(
+            status_code=422, detail=f"Snippets are limited to {MAX_SNIPPET_SECONDS:.0f}s; this one is "
+                                    f"{cfg.clip_duration:.1f}s."
+        )
+    if cfg.transition_duration > cfg.clip_duration:
+        cfg.transition_duration = max(0.2, cfg.clip_duration)
+    return video, cfg, duration
+
+
+def _logo() -> Path | None:
+    return LOGO_FILE if LOGO_FILE and Path(LOGO_FILE).is_file() else None
+
+
+@app.get("/api/snippet-sources")
+def snippet_sources():
+    songs = []
+    if VIDEO_DIR.is_dir():
+        for p in sorted(VIDEO_DIR.iterdir()):
+            if p.is_file() and p.name.endswith(SNIPPET_SUFFIX) and not p.name.startswith("."):
+                if ".part" in p.name:
+                    continue
+                songs.append({"name": p.name[: -len(SNIPPET_SUFFIX)], "duration": get_duration(p)})
+    return {
+        "songs": songs,
+        "transitions": [{"id": t, "label": TRANSITION_LABELS[t]} for t in TRANSITIONS],
+        "defaults": SnippetConfig().to_dict(),
+        "logo": str(_logo()) if _logo() else None,
+    }
+
+
+@app.get("/api/video/snippet-source/{song_name}")
+def stream_snippet_source(song_name: str, request: Request):
+    video = _snippet_source(song_name)
+    if not video:
+        raise HTTPException(status_code=404, detail="Rendered video not found")
+    return range_streaming_response(request, video)
+
+
+@app.post("/api/snippet-frame")
+def snippet_frame(payload: dict = Body(...)):
+    """One frame of the snippet timeline (clip, transition or end card) as a JPEG."""
+    video, cfg, _ = _snippet_request(payload)
+    try:
+        t = float(payload.get("time_sec", cfg.clip_duration + cfg.card_duration / 2))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="time_sec must be a number")
+    try:
+        with _FX_FRAME_SLOTS:
+            frame = render_snippet_frame(video, t, cfg, _logo())
+    except RuntimeError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 88])
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to encode frame")
+    return Response(content=buf.tobytes(), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+def _snippet_job(kind: str, song: str, video: Path, cfg: SnippetConfig, out: Path, **render_kw):
+    job = Job(kind, song)
+    with jobs_lock:
+        jobs[job.id] = job
+
+    def run():
+        job.status = "running"
+        job.message = "Preparing snippet..."
+
+        def progress(pct, msg):
+            job.progress = pct
+            job.message = msg
+
+        try:
+            render_snippet(
+                video, out, cfg, logo_path=_logo(), on_progress=progress,
+                cancel_check=lambda: job.cancel_requested, **render_kw,
+            )
+            job.status = "completed"
+            job.progress = 100.0
+            job.message = "Snippet ready." if kind == "snippet" else "Transition preview ready."
+            job.output_url = (
+                f"/api/video/snippet/{quote(out.name)}" if kind == "snippet"
+                else f"/api/video/preview/{out.stem}"
+            )
+        except Exception as e:
+            job.status = "cancelled" if job.cancel_requested else "failed"
+            job.error = str(e)
+            job.message = f"Error: {e}"
+
+    executor.submit(run)
+    return {"job_id": job.id}
+
+
+@app.post("/api/snippet")
+def start_snippet(payload: dict = Body(...)):
+    video, cfg, _ = _snippet_request(payload)
+    song = payload["song_name"]
+    out = _snippets_dir() / f"{song} - snippet {_fmt_stamp(cfg.start)}-{_fmt_stamp(cfg.end)}.mp4"
+    return _snippet_job("snippet", song, video, cfg, out)
+
+
+@app.post("/api/snippet-preview")
+def start_snippet_preview(payload: dict = Body(...)):
+    """Fast, low-res render of just the ending (a little clip, the transition and the card)."""
+    video, cfg, _ = _snippet_request(payload)
+    prune_previews()
+    lead = min(cfg.clip_duration, cfg.transition_duration + 1.0)
+    window = (cfg.clip_duration - lead, cfg.total_duration)
+    out = PREVIEWS_DIR / f"{uuid.uuid4().hex[:10]}.mp4"
+    return _snippet_job(
+        "snippet-preview", payload["song_name"], video, cfg, out,
+        window=window, max_width=540, preset="veryfast",
+    )
+
+
+@app.get("/api/snippets")
+def list_snippets():
+    folder = _snippets_dir()
+    items = []
+    if folder.is_dir():
+        files = [p for p in folder.glob("*.mp4") if ".part" not in p.name]
+        for p in sorted(files, key=lambda p: p.stat().st_mtime, reverse=True):
+            items.append({
+                "name": p.name,
+                "url": f"/api/video/snippet/{quote(p.name)}",
+                "size_mb": round(p.stat().st_size / 1e6, 1),
+            })
+    return {"snippets": items}
+
+
+@app.get("/api/video/snippet/{name}")
+def stream_snippet(name: str, request: Request):
+    folder = _snippets_dir().resolve()
+    path = (folder / name).resolve()
+    if path.parent != folder or path.suffix != ".mp4" or not path.is_file():
+        raise HTTPException(status_code=404, detail="Snippet not found")
+    return range_streaming_response(request, path)
+
+
 @app.get("/")
 def index():
     index_file = WEB_DIR / "index.html"
@@ -908,9 +1103,10 @@ def main():
     parser.add_argument("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=8765, help="Port to listen on (default: 8765)")
     parser.add_argument("--project-root", type=Path, help="Override project root directory")
+    parser.add_argument("--logo", type=Path, help="Image used on the snippet end card")
     args = parser.parse_args()
 
-    global PROJECT_ROOT, LYRICS_DIR, AUDIO_DIR, VIDEO_DIR, PREVIEWS_DIR, CONFIG_DIR, PRESETS_FILE
+    global PROJECT_ROOT, LYRICS_DIR, AUDIO_DIR, VIDEO_DIR, PREVIEWS_DIR, CONFIG_DIR, PRESETS_FILE, LOGO_FILE
     if args.project_root:
         PROJECT_ROOT = args.project_root.expanduser().resolve()
         LYRICS_DIR = PROJECT_ROOT / "lyrics"
@@ -921,6 +1117,9 @@ def main():
         CONFIG_DIR = PROJECT_ROOT / ".lyrics_sync"
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         PRESETS_FILE = CONFIG_DIR / "presets.json"
+        LOGO_FILE = PROJECT_ROOT / "gemini_gens" / "Gemini_Generated_Image_e6vvqpe6vvqpe6vv.jpeg"
+    if args.logo:
+        LOGO_FILE = args.logo.expanduser().resolve()
 
     print(f"Starting content_tools studio on http://{args.host}:{args.port}")
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")

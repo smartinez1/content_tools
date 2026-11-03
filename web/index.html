@@ -16,7 +16,11 @@
         <p class="tagline">Lyrics & Subtitles Studio (Lo-Fi Emo-Trap Engine)</p>
       </div>
     </div>
-    <div class="song-bar">
+    <nav class="tab-bar" role="tablist">
+      <button class="tab-btn active" data-tab="studio" role="tab">Studio</button>
+      <button class="tab-btn" data-tab="snippets" role="tab">Snippets</button>
+    </nav>
+    <div class="song-bar" id="studioSongBar">
       <label for="songSelect">Song:</label>
       <select id="songSelect">
         <option value="">Loading songs...</option>
@@ -283,6 +287,106 @@
     </aside>
   </main>
 
+  <!-- Snippets: cut a rendered video, close with a transition and the end card -->
+  <main class="studio-layout snippet-layout" id="snippetLayout" hidden>
+    <section class="stage-pane">
+      <div class="video-container snip-stage" id="snipStage">
+        <video id="snipVideo" controls playsinline preload="auto"></video>
+        <img id="snipFrame" class="snip-frame" alt="End card preview" hidden>
+      </div>
+
+      <div class="snip-range-card">
+        <div class="snip-strip" id="snipStrip" title="Click to seek">
+          <div class="snip-strip-sel" id="snipStripSel" title="Drag to move, drag the edges to trim">
+            <span class="snip-handle left" data-edge="start"></span>
+            <span class="snip-handle right" data-edge="end"></span>
+          </div>
+          <div class="snip-strip-head" id="snipStripHead"></div>
+        </div>
+        <div class="snip-range-row">
+          <div class="snip-time">
+            <label for="snipStart">Start</label>
+            <button class="btn-tiny" data-snip="start-">−</button>
+            <input type="text" id="snipStart" inputmode="decimal" value="0:00.00" title="m:ss.cc (or plain seconds)">
+            <button class="btn-tiny" data-snip="start+">+</button>
+            <button class="btn-tiny" data-snip="start-now" title="Start = playhead">⌖ playhead</button>
+          </div>
+          <div class="snip-time">
+            <label for="snipEnd">End</label>
+            <button class="btn-tiny" data-snip="end-">−</button>
+            <input type="text" id="snipEnd" inputmode="decimal" value="0:15.00" title="m:ss.cc (or plain seconds)">
+            <button class="btn-tiny" data-snip="end+">+</button>
+            <button class="btn-tiny" data-snip="end-now" title="End = playhead">⌖ playhead</button>
+          </div>
+        </div>
+        <div class="snip-range-row">
+          <button id="btnSnipPlaySel" class="btn-secondary">▶ Play selection</button>
+          <label class="switch-label"><input type="checkbox" id="snipLoop"> Loop</label>
+          <span class="lines-meta" id="snipLength">15.00 s + 3.0 s card</span>
+        </div>
+      </div>
+    </section>
+
+    <aside class="control-panel">
+      <div class="panel-section">
+        <div class="section-title"><span>Video</span></div>
+        <select id="snipSong" class="full-select"><option value="">Loading...</option></select>
+        <p class="fx-note" id="snipSongNote">Snippets are cut from the rendered "&lt;song&gt; - lyrics.mp4".</p>
+      </div>
+
+      <div class="panel-section">
+        <div class="section-title"><span>Transition</span></div>
+        <div class="chip-row" id="snipTransitions"></div>
+        <div class="fx-row">
+          <label>Duration <span class="fx-val" id="snipTransDurVal">0.60 s</span></label>
+          <input type="range" id="snipTransDur" min="0.2" max="2" step="0.05" value="0.6">
+        </div>
+        <p class="fx-note">Combine as many as you like; they also play in reverse to bring in the end card.</p>
+      </div>
+
+      <div class="panel-section">
+        <div class="section-title"><span>End card</span></div>
+        <div class="fx-row">
+          <label for="snipText">Release text</label>
+          <input type="text" id="snipText" class="text-input" value="20.11.2026" maxlength="40">
+        </div>
+        <div class="fx-row">
+          <label>Card duration <span class="fx-val" id="snipCardDurVal">3.0 s</span></label>
+          <input type="range" id="snipCardDur" min="1" max="6" step="0.5" value="3">
+        </div>
+        <label class="switch-label"><input type="checkbox" id="snipMusic" checked> Music under end card</label>
+        <label class="switch-label"><input type="checkbox" id="snipFadeIn" checked> Fade in</label>
+        <label class="switch-label" title="Snaps start/end to the nearest beat and makes the transition and fades whole beats long"><input type="checkbox" id="snipBeat" checked> Sync to the beat</label>
+      </div>
+
+      <div class="panel-section action-section">
+        <div class="action-buttons-column">
+          <div class="grid-2">
+            <button id="btnSnipCard" class="btn-secondary">🔍 Preview end card</button>
+            <button id="btnSnipPreview" class="btn-secondary">🎞 Preview transition</button>
+          </div>
+          <button id="btnSnipExport" class="btn-primary">⬇ Export snippet</button>
+        </div>
+        <div id="snipJobCard" class="job-card" style="display: none;">
+          <div class="job-card-header">
+            <span id="snipJobTitle" class="job-title">Processing...</span>
+            <button id="btnSnipCancel" class="btn-tiny btn-danger">Cancel</button>
+          </div>
+          <div class="progress-bar-container">
+            <div id="snipJobBar" class="progress-bar-fill" style="width: 0%;"></div>
+          </div>
+          <p id="snipJobMessage" class="job-message"></p>
+        </div>
+      </div>
+
+      <div class="panel-section">
+        <div class="section-title"><span>Exported snippets</span></div>
+        <div id="snipList" class="snip-list"><div class="placeholder-msg">None yet.</div></div>
+      </div>
+    </aside>
+  </main>
+
   <script src="/static/app.js"></script>
+  <script src="/static/snippets.js"></script>
 </body>
 </html>

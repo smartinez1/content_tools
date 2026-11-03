@@ -39,7 +39,7 @@ lyrics-sync = "lyrics_sync:main"
 content-tools-ui = "lyrics_sync_ui:main"
 
 [tool.setuptools]
-py-modules = ["lyrics_sync", "lyrics_sync_ui", "mov_to_mp4", "video_fx"]
+py-modules = ["lyrics_sync", "lyrics_sync_ui", "mov_to_mp4", "snippets", "video_fx"]
 
 [tool.ruff]
 line-length = 100
