@@ -333,16 +333,20 @@
 
     els.song.addEventListener("change", () => selectSong(els.song.value));
     els.video.addEventListener("loadedmetadata", refresh);
-    els.video.addEventListener("timeupdate", () => {
-      refresh();
-      if (playingSelection && els.video.currentTime >= tval(els.end)) {
-        if (els.loop.checked) els.video.currentTime = tval(els.start);
-        else {
-          els.video.pause();
-          playingSelection = false;
+    els.video.addEventListener("timeupdate", refresh);
+    // Selection playback is watched every frame (timeupdate is too coarse, and right after a seek
+    // it can still report the old position and stop playback by mistake).
+    const watchSelection = () => {
+      if (playingSelection && !els.video.paused && !els.video.seeking) {
+        const end = tval(els.end);
+        if (els.video.currentTime >= end - 0.02) {
+          if (els.loop.checked) els.video.currentTime = tval(els.start);
+          else stopSelection();
         }
       }
-    });
+      requestAnimationFrame(watchSelection);
+    };
+    requestAnimationFrame(watchSelection);
     els.video.addEventListener("play", hideFrame);
     els.video.addEventListener("seeking", hideFrame);
     els.frame.addEventListener("click", hideFrame);
@@ -417,12 +421,36 @@
       })
     );
 
+    function stopSelection() {
+      playingSelection = false;
+      els.video.pause();
+      syncPlayButton();
+    }
+    function syncPlayButton() {
+      els.btnPlaySel.textContent = playingSelection && !els.video.paused ? "⏸ Pause" : "▶ Play selection";
+    }
     els.btnPlaySel.addEventListener("click", () => {
-      els.video.currentTime = tval(els.start);
+      if (playingSelection && !els.video.paused) {
+        stopSelection();
+        return;
+      }
+      const t = els.video.currentTime;
+      // resume from the playhead when it is inside the selection, otherwise start at the start
+      if (!(t >= tval(els.start) && t < tval(els.end) - 0.05)) els.video.currentTime = tval(els.start);
       playingSelection = true;
       els.video.play().catch(() => {});
     });
-    els.video.addEventListener("pause", () => { playingSelection = playingSelection && !els.video.ended; });
+    els.video.addEventListener("play", syncPlayButton);
+    els.video.addEventListener("pause", syncPlayButton);
+    els.video.addEventListener("ended", () => {
+      if (playingSelection && els.loop.checked) {
+        els.video.currentTime = tval(els.start);
+        els.video.play().catch(() => {});
+      } else {
+        playingSelection = false;
+        syncPlayButton();
+      }
+    });
 
     [els.transDur, els.cardDur].forEach((el) => el.addEventListener("input", () => { hideFrame(); refresh(); }));
     [els.text, els.music, els.fadeIn, els.beat].forEach((el) => el.addEventListener("change", () => { hideFrame(); refresh(); }));

@@ -51,18 +51,6 @@
         <input type="range" id="timelineSlider" class="timeline-slider" min="0" max="100" step="0.05" value="0">
       </div>
 
-      <!-- Rendered 10s preview: modal lightbox, outside the stage layout so it can't squeeze the video.
-           The source video stays loaded behind it (currentTime stays song time). -->
-      <div id="previewPanel" class="modal-backdrop" hidden>
-        <div class="dialog" role="dialog" aria-modal="true" aria-label="Preview result">
-          <div class="panel-header">
-            <h3>Preview result</h3>
-            <button id="btnClosePreview" class="btn-secondary">Close (Esc)</button>
-          </div>
-          <video id="previewVideo" controls playsinline preload="auto"></video>
-        </div>
-      </div>
-
       <!-- Clickable Line Timeline -->
       <div class="lines-card">
         <div class="lines-card-header">
@@ -321,7 +309,7 @@
         </div>
         <div class="snip-range-row">
           <button id="btnSnipPlaySel" class="btn-secondary">▶ Play selection</button>
-          <label class="switch-label"><input type="checkbox" id="snipLoop"> Loop</label>
+          <label class="switch-label"><input type="checkbox" id="snipLoop" checked> Loop</label>
           <span class="lines-meta" id="snipLength">15.00 s + 3.0 s card</span>
         </div>
       </div>
@@ -385,6 +373,19 @@
       </div>
     </aside>
   </main>
+
+  <!-- Rendered 10s preview: modal lightbox, outside the stage layout so it can't squeeze the video.
+       The source video stays loaded behind it (currentTime stays song time). -->
+  <div id="previewPanel" class="modal-backdrop" hidden>
+    <div class="dialog" role="dialog" aria-modal="true" aria-label="Preview result">
+      <div class="panel-header">
+        <h3>Preview result</h3>
+        <button id="btnClosePreview" class="btn-secondary">Close (Esc)</button>
+      </div>
+      <video id="previewVideo" controls playsinline preload="auto"></video>
+    </div>
+  </div>
+
 
   <script src="/static/app.js"></script>
   <script src="/static/snippets.js"></script>

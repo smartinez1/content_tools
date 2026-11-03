@@ -13,6 +13,7 @@ import sys
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from urllib.parse import quote
 
@@ -49,6 +50,7 @@ from snippets import (
     SnippetConfig,
     render_snippet,
     render_snippet_frame,
+    sync_to_beats,
 )
 from video_fx import (
     AestheticConfig,
@@ -1057,12 +1059,14 @@ def start_snippet_preview(payload: dict = Body(...)):
     """Fast, low-res render of just the ending (a little clip, the transition and the card)."""
     video, cfg, _ = _snippet_request(payload)
     prune_previews()
+    # snap to the beat grid first: the window below must be measured on the final timeline
+    cfg = replace(sync_to_beats(video, cfg), beat_sync=False)
     lead = min(cfg.clip_duration, cfg.transition_duration + 1.0)
     window = (cfg.clip_duration - lead, cfg.total_duration)
     out = PREVIEWS_DIR / f"{uuid.uuid4().hex[:10]}.mp4"
     return _snippet_job(
         "snippet-preview", payload["song_name"], video, cfg, out,
-        window=window, max_width=540, preset="veryfast",
+        window=window, max_width=540, preset="veryfast", crf=24,
     )
 
 
