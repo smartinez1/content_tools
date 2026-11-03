@@ -62,10 +62,8 @@ const mainVideo = document.getElementById("mainVideo");
 const subOverlay = document.getElementById("subOverlay");
 const subText = document.getElementById("subText");
 const videoContainer = document.getElementById("videoContainer");
-const lofiScanlinesLayer = document.getElementById("lofiScanlinesLayer");
-const lofiFogLayer = document.getElementById("lofiFogLayer");
+const stageFx = document.getElementById("stageFx");
 
-const btnPlay = document.getElementById("btnPlay");
 const timeDisplay = document.getElementById("timeDisplay");
 const timelineSlider = document.getElementById("timelineSlider");
 const linesList = document.getElementById("linesList");
@@ -126,12 +124,11 @@ const karaokeTag = document.getElementById("karaokeTag");
 const lofiMasterToggle = document.getElementById("lofiMasterToggle");
 const fxControls = document.getElementById("fxControls");
 const btnFxFrame = document.getElementById("btnFxFrame");
+const btnFxClip = document.getElementById("btnFxClip");
+const btnFxOriginal = document.getElementById("btnFxOriginal");
 const btnFxResetAll = document.getElementById("btnFxResetAll");
 const fxAutoRefresh = document.getElementById("fxAutoRefresh");
-const fxFramePanel = document.getElementById("fxFramePanel");
-const fxFrameImg = document.getElementById("fxFrameImg");
 const fxFrameStatus = document.getElementById("fxFrameStatus");
-const btnCloseFxFrame = document.getElementById("btnCloseFxFrame");
 
 // Action Buttons
 const btnPreview10s = document.getElementById("btnPreview10s");
@@ -234,7 +231,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   setupDragReposition();
   setupOverlayTracking();
   setupPanels();
-  updateLofiPreviewCSS();
 });
 
 // The caption overlay is positioned in pixels from the video's on-screen box, so it must be
@@ -267,15 +263,17 @@ function closePreviewModal() {
   previewPanel.hidden = true;
 }
 
-function closeFxFramePanel() {
-  fxFrameReq += 1; // ignore any render still in flight
+// Back to the plain source frame (also drops any in-flight FX render, whose result would be stale).
+function hideStageFx() {
+  fxFrameReq += 1;
   if (fxFrameAbort) fxFrameAbort.abort();
-  fxFramePanel.hidden = true;
+  clearTimeout(fxFrameTimer);
+  stageFx.hidden = true;
+  fxFrameStatus.textContent = "";
 }
 
 function setupPanels() {
   btnClosePreview.addEventListener("click", closePreviewModal);
-  btnCloseFxFrame.addEventListener("click", closeFxFramePanel);
   // click on the dimmed backdrop (not the dialog) closes the preview
   previewPanel.addEventListener("click", (e) => {
     if (e.target === previewPanel) closePreviewModal();
@@ -283,7 +281,6 @@ function setupPanels() {
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
     if (!previewPanel.hidden) closePreviewModal();
-    else if (!fxFramePanel.hidden) closeFxFramePanel();
   });
 }
 
@@ -477,7 +474,6 @@ function buildFxControls() {
       fxToggleEls[group.toggle] = box;
       box.addEventListener("change", () => {
         aestheticState[group.toggle] = box.checked;
-        updateLofiPreviewCSS();
         scheduleFxFrame();
       });
     }
@@ -491,7 +487,6 @@ function buildFxControls() {
       if (group.toggle) aestheticState[group.toggle] = fxSchema.defaults[group.toggle];
       names.forEach((n) => (aestheticState[n] = fxSchema.defaults[n]));
       syncFxControls();
-      updateLofiPreviewCSS();
       scheduleFxFrame();
     });
 
@@ -513,7 +508,6 @@ function buildFxControls() {
         const v = spec.kind === "int" ? Math.round(Number(input.value)) : Number(input.value);
         aestheticState[name] = v;
         valueEl.textContent = fxFormat(name, v);
-        updateLofiPreviewCSS();
       });
       input.addEventListener("change", scheduleFxFrame); // on release, not while dragging
       body.appendChild(row);
@@ -536,7 +530,6 @@ function syncFxControls() {
 function applyAesthetics(fx) {
   aestheticState = { ...(fxSchema ? fxSchema.defaults : {}), ...fx };
   syncFxControls();
-  updateLofiPreviewCSS();
   scheduleFxFrame();
 }
 
@@ -546,23 +539,26 @@ function scheduleFxFrame() {
   fxFrameTimer = setTimeout(renderFxFrame, 350);
 }
 
-// One frame at the playhead through the real effect stack (~1s instead of a full preview render).
-async function renderFxFrame() {
+// The frame to show: the scrubbed time, or just inside the first line when nothing is chosen yet.
+function stageTime() {
+  return mainVideo.currentTime > 0.05 ? mainVideo.currentTime : (timings[0]?.start ?? 0) + 1;
+}
+
+// Run an FX request and lay the result (a JPEG frame or a GIF clip) over the video.
+async function showStageFx(url, body, label) {
   if (!currentSong) return alert("Select a song first.");
   const mine = ++fxFrameReq;
-  if (fxFrameAbort) fxFrameAbort.abort(); // a newer knob position makes the in-flight one pointless
+  if (fxFrameAbort) fxFrameAbort.abort(); // a newer request makes the in-flight one pointless
   fxFrameAbort = new AbortController();
-  const t = mainVideo.currentTime > 0.05 ? mainVideo.currentTime : (timings[0]?.start ?? 0) + 1;
-  fxFramePanel.hidden = false;
   fxFrameStatus.textContent = "rendering...";
   try {
-    const res = await fetch("/api/fx-frame", {
+    const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ song_name: currentSong, time_sec: t, aesthetics: aestheticState }),
+      body: JSON.stringify({ song_name: currentSong, aesthetics: aestheticState, ...body }),
       signal: fxFrameAbort.signal,
     });
-    if (mine !== fxFrameReq) return; // a newer request superseded this one
+    if (mine !== fxFrameReq) return;
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.detail || `HTTP ${res.status}`);
@@ -571,12 +567,24 @@ async function renderFxFrame() {
     if (mine !== fxFrameReq) return;
     if (fxFrameUrl) URL.revokeObjectURL(fxFrameUrl);
     fxFrameUrl = URL.createObjectURL(blob);
-    fxFrameImg.src = fxFrameUrl;
-    fxFrameStatus.textContent = `at ${t.toFixed(1)}s`;
+    stageFx.src = fxFrameUrl;
+    stageFx.hidden = false;
+    fxFrameStatus.textContent = label;
+    updateOverlay();
   } catch (err) {
     if (err.name === "AbortError") return; // superseded on purpose
     if (mine === fxFrameReq) fxFrameStatus.textContent = `failed: ${err.message}`;
   }
+}
+
+function renderFxFrame() {
+  const t = stageTime();
+  return showStageFx("/api/fx-frame", { time_sec: t }, `frame at ${t.toFixed(1)}s`);
+}
+
+function renderFxClip() {
+  const t = stageTime();
+  return showStageFx("/api/fx-clip", { time_sec: t, duration: 1.0 }, `clip from ${t.toFixed(1)}s`);
 }
 
 // ---------------------------------------------------------------------------
@@ -765,9 +773,8 @@ function setupLineEditor() {
     const line = timings[index];
     const now = mainVideo.currentTime || 0;
     switch (btn.dataset.action) {
-      case "play":
-        mainVideo.currentTime = Math.max(0, line.start + lyricOffset() - 0.2);
-        mainVideo.play();
+      case "play": // show this line: jump to its middle and refresh the frame
+        mainVideo.currentTime = Math.max(0, (line.start + line.end) / 2 + lyricOffset());
         break;
       case "start-": setLineTime(index, "start", line.start - NUDGE_SECONDS); break;
       case "start+": setLineTime(index, "start", line.start + NUDGE_SECONDS); break;
@@ -822,46 +829,6 @@ function setupLineEditor() {
 }
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
-
-// CSS approximation of the effects the browser can mirror. Zoom, glitch, noise and frame rate
-// only appear in rendered output / the single-frame preview.
-function updateLofiPreviewCSS() {
-  const s = aestheticState;
-  const on = s.enabled;
-  if (lofiScanlinesLayer) {
-    const active = on && s.crt_scanlines && (s.scanline_strength ?? 0.09) > 0;
-    lofiScanlinesLayer.classList.toggle("active", active);
-    // 0.09 darkening in the renderer ~ 0.28 alpha for the 1px CSS line
-    lofiScanlinesLayer.style.setProperty("--scan-alpha", clamp((s.scanline_strength ?? 0.09) * 3.1, 0, 1));
-    lofiScanlinesLayer.style.setProperty("--scan-period", `${s.scanline_spacing ?? 3}px`);
-  }
-  if (lofiFogLayer) {
-    const active = on && s.fogged_glass_vignette && (s.fog_amount ?? 1) > 0;
-    lofiFogLayer.classList.toggle("active", active);
-    lofiFogLayer.style.opacity = active ? String(clamp(s.fog_amount ?? 1, 0, 1)) : "0";
-  }
-  if (mainVideo) {
-    const parts = [];
-    if (on && s.color_wash && (s.wash_amount ?? 1) > 0) {
-      const a = s.wash_amount ?? 1;
-      const desat = s.wash_desat ?? 1;
-      parts.push(
-        `contrast(${1 + 0.18 * a}) brightness(${1 - 0.08 * a}) ` +
-        `hue-rotate(${-12 * a}deg) saturate(${clamp(1 - 0.35 * a * desat, 0, 2)})`
-      );
-    }
-    if (on && s.color_grade) {
-      // rough CSS stand-ins for the renderer's grade (the FX frame preview is exact)
-      parts.push(
-        `brightness(${clamp(1 + (s.grade_brightness ?? 0) / 160 + (s.grade_fade ?? 0) / 400, 0.3, 2)}) ` +
-        `contrast(${clamp((s.grade_contrast ?? 1) - (s.grade_fade ?? 0) / 400, 0.3, 2)}) ` +
-        `saturate(${clamp(s.grade_saturation ?? 1, 0, 2)})`
-      );
-    }
-    mainVideo.style.filter = parts.join(" ");
-  }
-  updateOverlay();
-}
 
 // Where the caption sits, in 1080x1920 render space: the explicit drag/slider position when set,
 // otherwise the alignment grid + bottom margin (same rules the overlay has always used).
@@ -977,8 +944,16 @@ function updateOverlay() {
     return;
   }
 
+  // Lay the FX image exactly over the (hidden-behind) source frame.
+  stageFx.style.left = `${mainVideo.offsetLeft}px`;
+  stageFx.style.top = `${mainVideo.offsetTop}px`;
+  stageFx.style.width = `${mainVideo.clientWidth}px`;
+  stageFx.style.height = `${mainVideo.clientHeight}px`;
+
+  // This is a still frame used to place the caption, so show the closest line even in a gap.
   const t = mainVideo.currentTime - lyricOffset(); // lyric time
-  const currentLine = timings.find((l) => t >= l.start - 0.15 && t <= l.end + 0.35);
+  const distance = (l) => (t < l.start ? l.start - t : t > l.end ? t - l.end : 0);
+  const currentLine = timings.reduce((best, l) => (!best || distance(l) < distance(best) ? l : best), null);
 
   if (!currentLine) {
     subOverlay.style.display = "none";
@@ -1114,16 +1089,6 @@ function setupDragReposition() {
 function setupEventListeners() {
   songSelect.addEventListener("change", (e) => selectSong(e.target.value));
 
-  btnPlay.addEventListener("click", () => {
-    if (mainVideo.paused) {
-      mainVideo.play();
-      btnPlay.textContent = "⏸ Pause";
-    } else {
-      mainVideo.pause();
-      btnPlay.textContent = "▶ Play";
-    }
-  });
-
   mainVideo.addEventListener("timeupdate", () => {
     if (!mainVideo.duration) return;
     timeDisplay.textContent = `${formatTime(mainVideo.currentTime)} / ${formatTime(mainVideo.duration)}`;
@@ -1136,6 +1101,11 @@ function setupEventListeners() {
       mainVideo.currentTime = (e.target.value / 100) * mainVideo.duration;
       updateOverlay();
     }
+  });
+  // A new frame makes the FX picture stale: drop it, and re-render it when auto-refresh is on.
+  mainVideo.addEventListener("seeked", () => {
+    hideStageFx();
+    scheduleFxFrame();
   });
 
   // Typography inputs
@@ -1284,17 +1254,17 @@ function setupEventListeners() {
   // Aesthetic Toggles
   lofiMasterToggle.addEventListener("change", (e) => {
     aestheticState.enabled = e.target.checked;
-    updateLofiPreviewCSS();
     scheduleFxFrame();
   });
 
   btnFxFrame.addEventListener("click", renderFxFrame);
+  btnFxClip.addEventListener("click", renderFxClip);
+  btnFxOriginal.addEventListener("click", hideStageFx);
   btnFxResetAll.addEventListener("click", () => {
     if (!fxSchema) return;
     const enabled = aestheticState.enabled;
     aestheticState = { ...fxSchema.defaults, enabled };
     syncFxControls();
-    updateLofiPreviewCSS();
     scheduleFxFrame();
   });
 
@@ -1394,8 +1364,6 @@ function setupEventListeners() {
         if (job.output_url) {
           // Show the result in its own player; mainVideo stays on the source so the
           // timeline, line list and the next preview's start time remain song-relative.
-          mainVideo.pause();
-          btnPlay.textContent = "▶ Play";
           previewVideo.src = job.output_url;
           previewPanel.hidden = false;
           previewVideo.play().catch(() => {});
