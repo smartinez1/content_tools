@@ -15,10 +15,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from snippets import (
     TRANSITIONS,
     SnippetConfig,
+    _audio_filter,
     apply_transitions,
     build_end_card,
     crop_logo,
     render_snippet,
+    sync_to_beats,
 )
 from video_fx import find_ffmpeg
 
@@ -123,6 +125,31 @@ class TestConfig(unittest.TestCase):
         cfg = SnippetConfig()
         self.assertEqual(cfg.transitions, ["glitch"])
         self.assertEqual(cfg.release_text, "20.11.2026")
+
+
+class TestBeatSync(unittest.TestCase):
+    BEATS = np.arange(0.0, 60.0, 0.5)  # 120 BPM
+
+    def test_cut_points_and_fades_land_on_whole_beats(self):
+        cfg = SnippetConfig(start=10.13, end=20.31, transition_duration=0.7)
+        out = sync_to_beats(Path("x.mp4"), cfg, self.BEATS)
+        self.assertEqual((out.start, out.end), (10.0, 20.5))
+        self.assertAlmostEqual(out.transition_duration, 0.5)  # 0.7 s -> 1 beat
+        self.assertAlmostEqual(out.fade_in_seconds, 0.5)
+        self.assertAlmostEqual(out.music_fade_out, 1.5)  # 3 beats >= 1.5 s
+
+    def test_off_or_unclear_beats_leave_the_config_alone(self):
+        cfg = SnippetConfig(start=10.13, end=20.31)
+        self.assertEqual(sync_to_beats(Path("x.mp4"), SnippetConfig(beat_sync=False), self.BEATS).start, 0.0)
+        self.assertEqual(sync_to_beats(Path("x.mp4"), cfg, self.BEATS[:3]).start, 10.13)
+        self.assertEqual(sync_to_beats(Path("x.mp4"), cfg, np.arange(0, 60, 3.0)).start, 10.13)
+
+    def test_audio_fades_are_curved_and_close_a_lowpass(self):
+        f = _audio_filter(SnippetConfig(start=0, end=8), 11.0)
+        self.assertIn("afade=t=in", f)
+        self.assertEqual(f.count("curve=qsin"), 2)
+        self.assertIn("lowpass=f=", f)
+        self.assertIn("st=9.500", f)  # 1.5 s fade-out ending with the card
 
 
 class TestRender(unittest.TestCase):

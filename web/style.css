@@ -806,7 +806,12 @@ body {
 .snip-strip-sel {
   position: absolute; top: 0; bottom: 0; background: rgba(245, 158, 11, 0.45);
   border-left: 2px solid var(--accent-primary); border-right: 2px solid var(--accent-primary);
+  cursor: grab; touch-action: none; min-width: 4px;
 }
+.snip-strip-sel.dragging { cursor: grabbing; background: rgba(245, 158, 11, 0.6); }
+.snip-handle { position: absolute; top: -2px; bottom: -2px; width: 12px; cursor: ew-resize; }
+.snip-handle.left { left: -8px; }
+.snip-handle.right { right: -8px; }
 .snip-strip-head { position: absolute; top: -3px; bottom: -3px; width: 2px; background: #fff; }
 .snip-range-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .snip-time { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--text-muted); }

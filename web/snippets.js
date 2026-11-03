@@ -25,6 +25,7 @@
     cardDurVal: $("snipCardDurVal"),
     music: $("snipMusic"),
     fadeIn: $("snipFadeIn"),
+    beat: $("snipBeat"),
     btnPlaySel: $("btnSnipPlaySel"),
     btnCard: $("btnSnipCard"),
     btnPreview: $("btnSnipPreview"),
@@ -70,30 +71,49 @@
   const duration = () => (Number.isFinite(els.video.duration) ? els.video.duration : currentSource()?.duration || 0);
   const currentSource = () => sources.find((s) => s.name === els.song.value);
   const num = (el) => Number(el.value);
+  // times are shown as m:ss.cc; typing "70", "1:10" or "1:10.5" all work
+  function fmt(sec) {
+    const t = Math.max(0, Number(sec) || 0);
+    let m = Math.floor(t / 60);
+    let s = (t - m * 60).toFixed(2);
+    if (Number(s) >= 60) { m += 1; s = "0.00"; }
+    return `${m}:${s.padStart(5, "0")}`;
+  }
+  function parseTime(text) {
+    const parts = String(text).trim().replace(",", ".").split(":");
+    if (!parts.length || parts.length > 3) return NaN;
+    return parts.reduce((acc, p) => acc * 60 + (p === "" ? 0 : Number(p)), 0);
+  }
+  const tval = (el) => {
+    const v = parseTime(el.value);
+    return Number.isFinite(v) ? v : 0;
+  };
 
   function config() {
     return {
-      start: num(els.start),
-      end: num(els.end),
+      start: tval(els.start),
+      end: tval(els.end),
       transitions: [...transitions],
       transition_duration: num(els.transDur),
       card_duration: num(els.cardDur),
       release_text: els.text.value,
       music_under_card: els.music.checked,
       fade_in: els.fadeIn.checked,
+      beat_sync: els.beat.checked,
     };
   }
 
   function applyConfig(cfg) {
     const c = { ...defaults, ...cfg };
-    els.start.value = Number(c.start).toFixed(2);
-    els.end.value = Number(c.end).toFixed(2);
+    els.start.value = fmt(Number(c.start));
+    els.end.value = fmt(Number(c.end));
     transitions = new Set(c.transitions || []);
     els.transDur.value = c.transition_duration;
     els.cardDur.value = c.card_duration;
     els.text.value = c.release_text;
     els.music.checked = !!c.music_under_card;
     els.fadeIn.checked = !!c.fade_in;
+    els.beat.checked = c.beat_sync !== false;
     renderChips();
     refresh();
   }
@@ -105,21 +125,21 @@
 
   function setTime(which, value) {
     const d = duration() || Infinity;
-    let v = Math.max(0, Math.min(d, Number(value) || 0));
+    let v = Math.max(0, Math.min(d, Number.isFinite(Number(value)) ? Number(value) : parseTime(value) || 0));
     if (which === "start") {
-      els.start.value = v.toFixed(2);
-      if (num(els.end) <= v) els.end.value = Math.min(d, v + 5).toFixed(2);
+      els.start.value = fmt(v);
+      if (tval(els.end) <= v) els.end.value = fmt(Math.min(d, v + 5));
     } else {
-      els.end.value = v.toFixed(2);
-      if (num(els.start) >= v) els.start.value = Math.max(0, v - 5).toFixed(2);
+      els.end.value = fmt(v);
+      if (tval(els.start) >= v) els.start.value = fmt(Math.max(0, v - 5));
     }
     hideFrame();
     refresh();
   }
 
   function refresh() {
-    const s = num(els.start);
-    const e = num(els.end);
+    const s = tval(els.start);
+    const e = tval(els.end);
     els.transDurVal.textContent = `${num(els.transDur).toFixed(2)} s`;
     els.cardDurVal.textContent = `${num(els.cardDur).toFixed(1)} s`;
     els.length.textContent = `${Math.max(0, e - s).toFixed(2)} s + ${num(els.cardDur).toFixed(1)} s card`;
@@ -315,8 +335,8 @@
     els.video.addEventListener("loadedmetadata", refresh);
     els.video.addEventListener("timeupdate", () => {
       refresh();
-      if (playingSelection && els.video.currentTime >= num(els.end)) {
-        if (els.loop.checked) els.video.currentTime = num(els.start);
+      if (playingSelection && els.video.currentTime >= tval(els.end)) {
+        if (els.loop.checked) els.video.currentTime = tval(els.start);
         else {
           els.video.pause();
           playingSelection = false;
@@ -334,34 +354,78 @@
       els.video.currentTime = ((e.clientX - r.left) / r.width) * d;
     });
 
-    els.start.addEventListener("change", () => setTime("start", els.start.value));
-    els.end.addEventListener("change", () => setTime("end", els.end.value));
+    // Drag the selection to move it, or its edges to trim it.
+    const MIN_LEN = 0.1;
+    els.stripSel.addEventListener("click", (e) => e.stopPropagation());
+    els.stripSel.addEventListener("pointerdown", (e) => {
+      const d = duration();
+      if (!d || e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const mode = e.target.dataset?.edge || "move";
+      const x0 = e.clientX;
+      const s0 = tval(els.start);
+      const e0 = tval(els.end);
+      const perPx = d / els.strip.getBoundingClientRect().width;
+      els.stripSel.setPointerCapture(e.pointerId);
+      els.stripSel.classList.add("dragging");
+      hideFrame();
+      const onMove = (ev) => {
+        const dt = (ev.clientX - x0) * perPx;
+        let s = s0;
+        let en = e0;
+        if (mode === "start") s = Math.max(0, Math.min(e0 - MIN_LEN, s0 + dt));
+        else if (mode === "end") en = Math.min(d, Math.max(s0 + MIN_LEN, e0 + dt));
+        else {
+          const shift = Math.max(-s0, Math.min(d - e0, dt));
+          s = s0 + shift;
+          en = e0 + shift;
+        }
+        els.start.value = fmt(s);
+        els.end.value = fmt(en);
+        // scrub the picture along the edge being moved
+        els.video.currentTime = mode === "end" ? en : s;
+        refresh();
+      };
+      const onUp = () => {
+        els.stripSel.classList.remove("dragging");
+        els.stripSel.removeEventListener("pointermove", onMove);
+        els.stripSel.removeEventListener("pointerup", onUp);
+        els.stripSel.removeEventListener("pointercancel", onUp);
+      };
+      els.stripSel.addEventListener("pointermove", onMove);
+      els.stripSel.addEventListener("pointerup", onUp);
+      els.stripSel.addEventListener("pointercancel", onUp);
+    });
+
+    els.start.addEventListener("change", () => setTime("start", tval(els.start)));
+    els.end.addEventListener("change", () => setTime("end", tval(els.end)));
     document.querySelectorAll("[data-snip]").forEach((b) =>
       b.addEventListener("click", () => {
         const now = els.video.currentTime || 0;
         switch (b.dataset.snip) {
-          case "start-": setTime("start", num(els.start) - NUDGE); break;
-          case "start+": setTime("start", num(els.start) + NUDGE); break;
-          case "end-": setTime("end", num(els.end) - NUDGE); break;
-          case "end+": setTime("end", num(els.end) + NUDGE); break;
+          case "start-": setTime("start", tval(els.start) - NUDGE); break;
+          case "start+": setTime("start", tval(els.start) + NUDGE); break;
+          case "end-": setTime("end", tval(els.end) - NUDGE); break;
+          case "end+": setTime("end", tval(els.end) + NUDGE); break;
           case "start-now": setTime("start", now); break;
           case "end-now": setTime("end", now); break;
         }
         // show the frame at the edited edge
-        if (b.dataset.snip.startsWith("start")) els.video.currentTime = num(els.start);
-        else els.video.currentTime = num(els.end);
+        if (b.dataset.snip.startsWith("start")) els.video.currentTime = tval(els.start);
+        else els.video.currentTime = tval(els.end);
       })
     );
 
     els.btnPlaySel.addEventListener("click", () => {
-      els.video.currentTime = num(els.start);
+      els.video.currentTime = tval(els.start);
       playingSelection = true;
       els.video.play().catch(() => {});
     });
     els.video.addEventListener("pause", () => { playingSelection = playingSelection && !els.video.ended; });
 
     [els.transDur, els.cardDur].forEach((el) => el.addEventListener("input", () => { hideFrame(); refresh(); }));
-    [els.text, els.music, els.fadeIn].forEach((el) => el.addEventListener("change", () => { hideFrame(); refresh(); }));
+    [els.text, els.music, els.fadeIn, els.beat].forEach((el) => el.addEventListener("change", () => { hideFrame(); refresh(); }));
 
     els.btnCard.addEventListener("click", previewCard);
     els.btnPreview.addEventListener("click", () =>

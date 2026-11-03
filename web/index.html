@@ -297,21 +297,24 @@
 
       <div class="snip-range-card">
         <div class="snip-strip" id="snipStrip" title="Click to seek">
-          <div class="snip-strip-sel" id="snipStripSel"></div>
+          <div class="snip-strip-sel" id="snipStripSel" title="Drag to move, drag the edges to trim">
+            <span class="snip-handle left" data-edge="start"></span>
+            <span class="snip-handle right" data-edge="end"></span>
+          </div>
           <div class="snip-strip-head" id="snipStripHead"></div>
         </div>
         <div class="snip-range-row">
           <div class="snip-time">
             <label for="snipStart">Start</label>
             <button class="btn-tiny" data-snip="start-">−</button>
-            <input type="number" id="snipStart" step="0.01" min="0" value="0">
+            <input type="text" id="snipStart" inputmode="decimal" value="0:00.00" title="m:ss.cc (or plain seconds)">
             <button class="btn-tiny" data-snip="start+">+</button>
             <button class="btn-tiny" data-snip="start-now" title="Start = playhead">⌖ playhead</button>
           </div>
           <div class="snip-time">
             <label for="snipEnd">End</label>
             <button class="btn-tiny" data-snip="end-">−</button>
-            <input type="number" id="snipEnd" step="0.01" min="0" value="15">
+            <input type="text" id="snipEnd" inputmode="decimal" value="0:15.00" title="m:ss.cc (or plain seconds)">
             <button class="btn-tiny" data-snip="end+">+</button>
             <button class="btn-tiny" data-snip="end-now" title="End = playhead">⌖ playhead</button>
           </div>
@@ -353,6 +356,7 @@
         </div>
         <label class="switch-label"><input type="checkbox" id="snipMusic" checked> Music under end card</label>
         <label class="switch-label"><input type="checkbox" id="snipFadeIn" checked> Fade in</label>
+        <label class="switch-label" title="Snaps start/end to the nearest beat and makes the transition and fades whole beats long"><input type="checkbox" id="snipBeat" checked> Sync to the beat</label>
       </div>
 
       <div class="panel-section action-section">

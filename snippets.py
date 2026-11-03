@@ -12,11 +12,12 @@ in reverse (p 1 -> 0) over its first ``CARD_INTRO`` seconds so the cut reads as 
 
 from __future__ import annotations
 
+import functools
 import os
 import shutil
 import subprocess
 import tempfile
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 import cv2
@@ -26,6 +27,7 @@ from video_fx import (
     apply_chromatic_aberration,
     apply_fuzzed_glitch,
     build_scanline_mask,
+    extract_audio_from_video,
     find_ffmpeg,
 )
 
@@ -41,6 +43,7 @@ CARD_INTRO = 0.4
 MAX_SNIPPET_SECONDS = 90.0
 FADE_IN_SECONDS = 0.3
 MUSIC_FADE_OUT = 1.5
+LOWPASS_OPEN, LOWPASS_CLOSED = 18000.0, 350.0  # the fade-out also closes a low-pass filter
 
 
 @dataclass
@@ -53,7 +56,11 @@ class SnippetConfig:
     card_duration: float = 3.0
     release_text: str = "20.11.2026"
     music_under_card: bool = True
+    beat_sync: bool = True
     seed: int = 7
+    # Fade lengths; ``sync_to_beats`` rewrites them to whole beats.
+    fade_in_seconds: float = FADE_IN_SECONDS
+    music_fade_out: float = MUSIC_FADE_OUT
 
     @property
     def clip_duration(self) -> float:
@@ -89,7 +96,7 @@ class SnippetConfig:
             raw = data["transitions"] if isinstance(data["transitions"], (list, tuple, set)) else []
             chosen = {str(t) for t in raw}
             cfg.transitions = [t for t in TRANSITIONS if t in chosen]
-        for key in ("fade_in", "music_under_card"):
+        for key in ("fade_in", "music_under_card", "beat_sync"):
             if key in data:
                 setattr(cfg, key, bool(data[key]))
         if isinstance(data.get("release_text"), str):
@@ -317,7 +324,10 @@ def _transition_progress(t: float, cfg: SnippetConfig) -> float:
 def compose_frame(t: float, source_frame, card: np.ndarray, cfg: SnippetConfig, rng) -> np.ndarray:
     """The output frame at snippet time ``t``; ``source_frame`` is only used inside the clip."""
     if t < cfg.clip_duration and source_frame is not None:
-        return apply_transitions(source_frame, cfg.transitions, _transition_progress(t, cfg), rng)
+        frame = apply_transitions(source_frame, cfg.transitions, _transition_progress(t, cfg), rng)
+        if cfg.fade_in and t < cfg.fade_in_seconds:  # picture rises from black with the audio
+            frame = (frame * _ease(t / cfg.fade_in_seconds)).astype(np.uint8)
+        return frame
     frame = card_frame(card, rng)
     into = t - cfg.clip_duration
     if cfg.transitions and into < CARD_INTRO:
@@ -339,17 +349,93 @@ def _probe(video: Path) -> tuple[float, int, int, float]:
     return fps, w, h, total
 
 
+def detect_beats(video: Path, t0: float, t1: float) -> np.ndarray:
+    """Beat times (seconds in the source video) between about ``t0`` and ``t1``; empty if unclear."""
+    try:
+        stat = video.stat()
+        return _detect_beats(str(video), stat.st_mtime_ns, round(t0, 1), round(t1, 1))
+    except Exception:  # no audio track, librosa trouble...: just don't sync
+        return np.zeros(0)
+
+
+@functools.lru_cache(maxsize=16)
+def _detect_beats(path: str, _mtime: int, t0: float, t1: float) -> np.ndarray:
+    import librosa
+
+    lo = max(0.0, t0 - 4.0)  # context either side makes the tempo estimate steadier
+    tmp = Path(tempfile.mkdtemp(prefix="beats_"))
+    try:
+        wav = extract_audio_from_video(Path(path), tmp / "a.wav", lo, (t1 + 4.0) - lo)
+        y, sr = librosa.load(str(wav), sr=22050, mono=True)
+        if len(y) < sr * 3:
+            return np.zeros(0)
+        _tempo, frames = librosa.beat.beat_track(y=y, sr=sr)
+        return librosa.frames_to_time(frames, sr=sr) + lo
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def sync_to_beats(video: Path, cfg: SnippetConfig, beats: np.ndarray | None = None) -> SnippetConfig:
+    """A copy of ``cfg`` whose cut points and fades sit on the song's beat grid.
+
+    The start and end snap to the nearest beat; the closing transition, the fade-in and the
+    music fade-out become whole numbers of beats. Without a clear beat the config is unchanged.
+    """
+    if not cfg.beat_sync:
+        return cfg
+    if beats is None:
+        beats = detect_beats(video, cfg.start, cfg.end)
+    beats = np.asarray(beats, dtype=float)
+    if len(beats) < 4:
+        return cfg
+    period = float(np.median(np.diff(beats)))
+    if not 0.25 <= period <= 1.5:  # implausible tempo (double/half-time errors etc.)
+        return cfg
+
+    def snap(x):
+        return float(beats[np.argmin(np.abs(beats - x))])
+
+    start, end = snap(cfg.start), snap(cfg.end)
+    if end - start < period:  # keep at least one beat
+        return cfg
+    n_trans = max(1, int(round(cfg.transition_duration / period)))
+    while n_trans > 1 and n_trans * period > 2.0:
+        n_trans -= 1
+    return replace(
+        cfg,
+        start=start,
+        end=end,
+        transition_duration=min(2.0, max(0.2, n_trans * period)),
+        fade_in_seconds=period,
+        music_fade_out=max(1, int(np.ceil(MUSIC_FADE_OUT / period))) * period,
+    )
+
+
+def _lowpass_stages(start: float, length: float, stages: int = 5) -> str:
+    """Cascade of low-pass filters switched on one after another through the fade-out, so the
+    sound gets duller as it fades (a plain volume ramp feels abrupt on a bassy mix)."""
+    out = []
+    for i in range(1, stages + 1):
+        frac = i / stages
+        freq = LOWPASS_OPEN * (LOWPASS_CLOSED / LOWPASS_OPEN) ** frac
+        at = start + length * (i - 1) / stages
+        out.append(f"lowpass=f={freq:.0f}:enable='gte(t,{at:.3f})'")
+    return ",".join(out)
+
+
 def _audio_filter(cfg: SnippetConfig, total: float) -> str:
+    """Soft audio ending: the fade-out is curved and also closes a low-pass (the music "sinks")."""
     parts = []
     if cfg.fade_in:
-        parts.append(f"afade=t=in:st=0:d={FADE_IN_SECONDS}")
+        parts.append(f"afade=t=in:st=0:d={cfg.fade_in_seconds:.3f}:curve=qsin")
     if cfg.music_under_card:
-        d = min(MUSIC_FADE_OUT, total)
-        parts.append(f"afade=t=out:st={max(0.0, total - d):.3f}:d={d:.3f}")
+        d = min(cfg.music_fade_out, total)
+        st = max(0.0, total - d)
     else:
         d = cfg.transition_duration if cfg.transitions else 0.3
         st = max(0.0, cfg.clip_duration - d)
-        parts.append(f"afade=t=out:st={st:.3f}:d={d:.3f}")
+    parts.append(_lowpass_stages(st, d))
+    parts.append(f"afade=t=out:st={st:.3f}:d={d:.3f}:curve=qsin")
     # keep the audio exactly as long as the video (silence under the card if the source ends)
     parts.append(f"apad=whole_dur={total:.3f}")
     return ",".join(parts)
@@ -378,6 +464,9 @@ def render_snippet(
         raise RuntimeError("The end time must be after the start time")
     if cfg.start >= src_total:
         raise RuntimeError(f"Start {cfg.start:.2f}s is past the end of the video ({src_total:.2f}s)")
+    synced = sync_to_beats(video, cfg)
+    if synced.end <= src_total:
+        cfg = synced
 
     total = cfg.total_duration
     w0, w1 = window if window else (0.0, total)
@@ -476,6 +565,7 @@ def render_snippet_frame(
     video: Path, t: float, cfg: SnippetConfig, logo_path: Path | None = None
 ) -> np.ndarray:
     """One output frame at snippet time ``t`` (clip, transition or end card) for quick checks."""
+    cfg = sync_to_beats(video, cfg)
     _fps, w, h, _total = _probe(video)
     t = min(max(0.0, float(t)), max(0.0, cfg.total_duration - 1e-3))
     card = build_end_card(w, h, logo_path, cfg.release_text)
