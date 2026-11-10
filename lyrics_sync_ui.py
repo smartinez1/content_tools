@@ -2,6 +2,7 @@
 """Local FastAPI web UI for lyrics synchronization, subtitle styling, and video rendering."""
 
 import argparse
+import difflib
 import io
 import json
 import math
@@ -29,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lyrics_sync import (
     AUDIO_DIR,
     LYRICS_DIR,
+    NON_SOURCE_MARKERS,
     PROJECT_ROOT,
     VIDEO_DIR,
     CaptionStyle,
@@ -81,7 +83,20 @@ CONFIG_DIR = PROJECT_ROOT / ".lyrics_sync"
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 PRESETS_FILE = CONFIG_DIR / "presets.json"
 # End-card logo for snippets (override with --logo)
-LOGO_FILE = PROJECT_ROOT / "gemini_gens" / "Gemini_Generated_Image_e6vvqpe6vvqpe6vv.jpeg"
+DEFAULT_LOGO_STEM = "Gemini_Generated_Image_e6vvqpe6vvqpe6vv"
+
+
+def default_logo(project_root: Path) -> Path:
+    """The bundled end-card logo, tolerant of the extension it was saved with."""
+    folder = project_root / "gemini_gens"
+    for ext in (".jpg", ".jpeg", ".png", ".webp"):
+        candidate = folder / f"{DEFAULT_LOGO_STEM}{ext}"
+        if candidate.is_file():
+            return candidate
+    return folder / f"{DEFAULT_LOGO_STEM}.jpg"
+
+
+LOGO_FILE = default_logo(PROJECT_ROOT)
 
 
 def get_project_root() -> Path:
@@ -166,27 +181,65 @@ def range_streaming_response(request: Request, file_path: Path, media_type: str 
     return StreamingResponse(iterfile(), status_code=206, headers=headers)
 
 
+def _has_exact_media(name: str) -> bool:
+    """True when ``name`` owns an audio or video file, i.e. it is not just a typo'd lyric file."""
+    for suffix in (" - Compose", ""):
+        for ext in (".mp4", ".mov", ".m4v"):
+            if (VIDEO_DIR / f"{name}{suffix}{ext}").is_file():
+                return True
+    for ext in (".wav", ".mp3"):
+        if (AUDIO_DIR / f"{name}{ext}").is_file():
+            return True
+    return False
+
+
+def _typo_alias_of(name: str, media_names: list[str]) -> str | None:
+    """The media-backed song this name is a misspelling of, if any (e.g. rudio -> ruido)."""
+    target = normalise_name(name)
+    best_name, best_score = None, 0.0
+    for candidate in media_names:
+        score = difflib.SequenceMatcher(None, target, normalise_name(candidate)).ratio()
+        if score > best_score:
+            best_name, best_score = candidate, score
+    return best_name if best_score >= 0.75 else None
+
+
 @app.get("/api/songs")
 def get_songs():
     """Scan the project directories and return discoverable songs and their asset states."""
     known = set()
-    for d in (LYRICS_DIR, AUDIO_DIR, VIDEO_DIR):
+    scan = (
+        (LYRICS_DIR, {".txt"}),
+        (AUDIO_DIR, {".wav", ".mp3"}),
+        (VIDEO_DIR, {".mp4", ".mov", ".m4v"}),
+    )
+    for d, suffixes in scan:
         if d.is_dir():
             for p in d.iterdir():
-                if p.is_file() and not p.name.startswith("."):
-                    if " - lyrics" not in p.name and "_lyrics" not in p.name:
-                        stem = p.stem.replace(" - Compose", "")
-                        known.add(stem)
+                if not p.is_file() or p.name.startswith(".") or p.suffix.lower() not in suffixes:
+                    continue
+                if not any(marker in p.name.lower() for marker in NON_SOURCE_MARKERS):
+                    stem = p.stem.replace(" - Compose", "")
+                    known.add(stem)
+
+    media_names = [name for name in known if _has_exact_media(name)]
 
     songs = []
     for name in sorted(known):
+        # A misspelled lyric file ("rudio blanco.txt") has no audio/video of its own; when it is
+        # a close match for a media-backed song, drop it instead of listing a duplicate.
+        if not _has_exact_media(name) and _typo_alias_of(name, media_names):
+            continue
         lyrics = find_closest(LYRICS_DIR, name, {".txt"}) or find_closest(PROJECT_ROOT, name, {".txt"})
         video = (
-            find_closest(VIDEO_DIR, name, {".mp4", ".mov", ".m4v"}, exclude=(" - lyrics", "_lyrics"))
-            or find_closest(PROJECT_ROOT, name, {".mp4", ".mov", ".m4v"}, exclude=(" - lyrics", "_lyrics"))
+            find_closest(VIDEO_DIR, name, {".mp4", ".mov", ".m4v"}, exclude=NON_SOURCE_MARKERS)
+            or find_closest(PROJECT_ROOT, name, {".mp4", ".mov", ".m4v"}, exclude=NON_SOURCE_MARKERS)
         )
         wav = find_closest(AUDIO_DIR, name, {".wav"})
-        rendered = find_closest(VIDEO_DIR, f"{name} - lyrics", {".mp4"})
+        # Renders are always written as "<song> - lyrics.mp4"; do not fuzzy-match, or a
+        # Compose video scores close enough and shows up as if it were the finished render.
+        rendered_path = VIDEO_DIR / f"{name} - lyrics.mp4"
+        rendered = rendered_path if rendered_path.is_file() else None
         timings = None
         if video:
             candidate = VIDEO_DIR / f"{name} - lyrics.json"
@@ -220,7 +273,7 @@ def get_timings(song_name: str):
     candidate = VIDEO_DIR / f"{song_name} - lyrics.json"
     if not candidate.exists():
         # Try finding via fuzzy lookup
-        video = find_closest(VIDEO_DIR, song_name, {".mp4", ".mov"}, exclude=(" - lyrics", "_lyrics"))
+        video = find_closest(VIDEO_DIR, song_name, {".mp4", ".mov"}, exclude=NON_SOURCE_MARKERS)
         if video:
             c2 = VIDEO_DIR / f"{video.stem} - lyrics.json"
             if c2.exists():
@@ -252,7 +305,7 @@ def put_timings(song_name: str, payload: dict = Body(...)):
 
     # Only allow songs that exist (get_timings does the same fuzzy lookup), so a crafted
     # name can't create arbitrary files.
-    video = find_closest(VIDEO_DIR, song_name, {".mp4", ".mov"}, exclude=(" - lyrics", "_lyrics"))
+    video = find_closest(VIDEO_DIR, song_name, {".mp4", ".mov"}, exclude=NON_SOURCE_MARKERS)
     if not video:
         raise HTTPException(status_code=404, detail="Source video not found")
     target = VIDEO_DIR / f"{song_name} - lyrics.json"
@@ -270,7 +323,7 @@ def put_timings(song_name: str, payload: dict = Body(...)):
 
 @app.get("/api/video/source/{song_name}")
 def stream_source_video(song_name: str, request: Request):
-    video = find_closest(VIDEO_DIR, song_name, {".mp4", ".mov", ".m4v"}, exclude=(" - lyrics", "_lyrics"))
+    video = find_closest(VIDEO_DIR, song_name, {".mp4", ".mov", ".m4v"}, exclude=NON_SOURCE_MARKERS)
     if not video:
         raise HTTPException(status_code=404, detail="Source video not found")
     return range_streaming_response(request, video)
@@ -305,7 +358,7 @@ _FX_FRAME_SLOTS = threading.BoundedSemaphore(2)
 def fx_frame(payload: dict = Body(...)):
     """Render one source frame with the Lo-Fi stack applied (JPEG) for fast knob tuning."""
     song_name = payload.get("song_name")
-    video = find_closest(VIDEO_DIR, song_name or "", {".mp4", ".mov"}, exclude=(" - lyrics", "_lyrics"))
+    video = find_closest(VIDEO_DIR, song_name or "", {".mp4", ".mov"}, exclude=NON_SOURCE_MARKERS)
     if not video:
         raise HTTPException(status_code=404, detail="Source video not found")
     try:
@@ -330,7 +383,7 @@ def fx_frame(payload: dict = Body(...)):
 def fx_clip(payload: dict = Body(...)):
     """A short, low-resolution animation (WebP, or GIF as a fallback) of the Lo-Fi stack so audio-reactive effects are visible."""
     song_name = payload.get("song_name")
-    video = find_closest(VIDEO_DIR, song_name or "", {".mp4", ".mov"}, exclude=(" - lyrics", "_lyrics"))
+    video = find_closest(VIDEO_DIR, song_name or "", {".mp4", ".mov"}, exclude=NON_SOURCE_MARKERS)
     if not video:
         raise HTTPException(
             status_code=404,
@@ -642,7 +695,7 @@ def start_align(payload: dict = Body(...)):
         raise HTTPException(status_code=400, detail="song_name required")
 
     # Check everything up front so the user gets a precise message instead of a failed job.
-    video = find_closest(VIDEO_DIR, song_name, {".mp4", ".mov"}, exclude=(" - lyrics", "_lyrics"))
+    video = find_closest(VIDEO_DIR, song_name, {".mp4", ".mov"}, exclude=NON_SOURCE_MARKERS)
     lyrics_path = find_closest(LYRICS_DIR, song_name, {".txt"}) or find_closest(PROJECT_ROOT, song_name, {".txt"})
     wav = find_closest(AUDIO_DIR, song_name, {".wav"})
     problems = []
@@ -719,7 +772,7 @@ def start_preview(payload: dict = Body(...)):
     start_sec = float(payload.get("start_sec", 24.0))
     duration_sec = float(payload.get("duration_sec", 10.0))
 
-    video = find_closest(VIDEO_DIR, song_name, {".mp4", ".mov"}, exclude=(" - lyrics", "_lyrics"))
+    video = find_closest(VIDEO_DIR, song_name, {".mp4", ".mov"}, exclude=NON_SOURCE_MARKERS)
     if not video:
         raise HTTPException(status_code=404, detail="Source video not found")
 
@@ -818,7 +871,7 @@ def start_render(payload: dict = Body(...)):
     aesthetics_dict = payload.get("aesthetics", {})
     lofi_mode = payload.get("lofi_mode", True)
 
-    video = find_closest(VIDEO_DIR, song_name, {".mp4", ".mov"}, exclude=(" - lyrics", "_lyrics"))
+    video = find_closest(VIDEO_DIR, song_name, {".mp4", ".mov"}, exclude=NON_SOURCE_MARKERS)
     if not video:
         raise HTTPException(status_code=404, detail="Source video not found")
 
@@ -1121,7 +1174,7 @@ def main():
         CONFIG_DIR = PROJECT_ROOT / ".lyrics_sync"
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         PRESETS_FILE = CONFIG_DIR / "presets.json"
-        LOGO_FILE = PROJECT_ROOT / "gemini_gens" / "Gemini_Generated_Image_e6vvqpe6vvqpe6vv.jpeg"
+        LOGO_FILE = default_logo(PROJECT_ROOT)
     if args.logo:
         LOGO_FILE = args.logo.expanduser().resolve()
 

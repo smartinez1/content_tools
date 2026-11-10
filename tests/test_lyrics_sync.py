@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from lyrics_sync import (
     CaptionStyle,
+    NON_SOURCE_MARKERS,
     build_ass,
     find_closest,
     hex_to_ass_color,
@@ -37,6 +38,22 @@ class TestColorAndNaming(unittest.TestCase):
             found = find_closest(d, "ruido blanco", {".txt"})
             self.assertIsNotNone(found)
             self.assertEqual(found.name, "rudio blanco.txt")
+
+    def test_find_closest_skips_snippet_outputs(self):
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            (d / "song - Compose.mp4").write_bytes(b"")
+            (d / "song - snippet 00m01.00s-00m31.00s.mp4").write_bytes(b"")
+
+            found = find_closest(d, "song", {".mp4"}, exclude=NON_SOURCE_MARKERS)
+            self.assertIsNotNone(found)
+            self.assertEqual(found.name, "song - Compose.mp4")
+
+    def test_non_source_markers_cover_lyrics_and_snippets(self):
+        for name in ("song - lyrics.mp4", "song_lyrics.mp4", "song - snippet 00m01.00s.mp4", "song_snippet.mp4"):
+            self.assertTrue(any(marker in name.lower() for marker in NON_SOURCE_MARKERS), name)
+        for name in ("song - Compose.mp4", "song.mp4", "song - instrumental.mp4"):
+            self.assertFalse(any(marker in name.lower() for marker in NON_SOURCE_MARKERS), name)
 
 
 class TestParser(unittest.TestCase):

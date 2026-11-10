@@ -154,6 +154,11 @@ def normalise_name(name: str) -> str:
     return re.sub(r"\s+", " ", name).strip()
 
 
+# File-name markers for outputs, which must never be picked as source material:
+# rendered lyric videos ("<song> - lyrics.mp4") and promo snippets ("<song> - snippet ....mp4").
+NON_SOURCE_MARKERS = (" - lyrics", "_lyrics", " - snippet", "_snippet")
+
+
 def find_closest(directory: Path, name: str, suffixes: set[str], exclude: tuple[str, ...] = ()) -> Path | None:
     if not directory.is_dir():
         return None
@@ -774,11 +779,11 @@ def main():
         song = args.song
         video = (
             args.video
-            or find_closest(VIDEO_DIR, song, {".mp4", ".mov", ".m4v"}, exclude=(" - lyrics", "_lyrics"))
-            or find_closest(PROJECT_ROOT, song, {".mp4", ".mov", ".m4v"}, exclude=(" - lyrics", "_lyrics"))
+            or find_closest(VIDEO_DIR, song, {".mp4", ".mov", ".m4v"}, exclude=NON_SOURCE_MARKERS)
+            or find_closest(PROJECT_ROOT, song, {".mp4", ".mov", ".m4v"}, exclude=NON_SOURCE_MARKERS)
         )
         if video is None:
-            sys.exit(f"No source video for {song!r} found in {VIDEO_DIR} (excluding rendered ' - lyrics' files).")
+            sys.exit(f"No source video for {song!r} found in {VIDEO_DIR} (excluding rendered lyrics/snippet files).")
         video = video.expanduser().resolve()
 
         lyrics = args.lyrics or find_closest(LYRICS_DIR, song, {".txt"}) or find_closest(PROJECT_ROOT, song, {".txt"})
