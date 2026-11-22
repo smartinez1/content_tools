@@ -161,6 +161,11 @@ class TestStitchEndToEnd(unittest.TestCase):
         self.assertEqual(len(groups[0]["segments"]), 3)
         self.assertTrue(groups[0]["output_url"])
 
+    def test_audio_start_must_be_a_number_or_auto(self):
+        res = self.client.post("/api/stitch", json={"group": "song - Compose", "audio_start": "soon"})
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("audio_start", res.json()["detail"])
+
     def test_failed_join_leaves_an_existing_video_alone(self):
         target = self.root / "sm_content" / "song - Compose.mp4"
         target.parent.mkdir(exist_ok=True)
@@ -180,3 +185,71 @@ class TestStitchEndToEnd(unittest.TestCase):
         self.assertEqual(res.status_code, 400)
         self.assertEqual(target.read_bytes(), b"precious")
         self.assertEqual([p.name for p in target.parent.iterdir()], ["song - Compose.mp4"])
+
+
+class TestMasterAlignment(unittest.TestCase):
+    """The song master is laid under the joined picture, shifted to match it."""
+
+    @classmethod
+    def setUpClass(cls):
+        import subprocess
+
+        from lyrics_sync import find_ffmpeg
+
+        cls.ff = find_ffmpeg()
+        cls.tmp = tempfile.TemporaryDirectory()
+        d = cls.d = Path(cls.tmp.name)
+
+        def ffm(*args):
+            subprocess.run([cls.ff, "-hide_banner", "-v", "error", "-y", *map(str, args)], check=True)
+
+        # master: 7 s of pink noise. The picture's own sound plays it 0.3 s late (the master is ahead).
+        ffm("-f", "lavfi", "-i", "anoisesrc=d=7:c=pink:r=48000:seed=11", "-ac", "2", d / "master.wav")
+        ffm("-f", "lavfi", "-i", "testsrc=size=160x90:rate=15:duration=6.3",
+            "-f", "lavfi", "-i", "anoisesrc=d=7:c=pink:r=48000:seed=11,adelay=300|300",
+            "-t", "6.3", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", d / "whole.mp4")
+        cls.pieces = []
+        for i in range(3):
+            piece = d / f"song_{i}.mp4"
+            ffm("-ss", i * 2.1, "-t", 2.1, "-i", d / "whole.mp4",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", piece)
+            cls.pieces.append(piece)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_negative_start_pads_silence_and_keeps_the_length(self):
+        from stitch_segments import SR, external_audio
+
+        data = external_audio(self.ff, self.d / "master.wav", self.d / "cut.wav", -0.5, 2.0)
+        self.assertEqual(len(data), round(2.0 * SR) * 4)
+        self.assertEqual(data[: round(0.5 * SR) * 4], b"\x00" * (round(0.5 * SR) * 4))
+        self.assertNotEqual(data[round(0.6 * SR) * 4 : round(0.7 * SR) * 4].strip(b"\x00"), b"")
+        positive = external_audio(self.ff, self.d / "master.wav", self.d / "cut2.wav", 0.25, 2.0)
+        self.assertEqual(len(positive), round(2.0 * SR) * 4)
+
+    def test_auto_start_finds_the_shift_and_the_result_follows_the_picture(self):
+        from lyrics_sync import estimate_offset
+        from stitch_segments import stitch
+
+        out = self.d / "joined.mp4"
+        result = stitch(self.pieces, out, audio=self.d / "master.wav", audio_start="auto")
+        self.assertAlmostEqual(result["audio_start"], -0.3, delta=0.03)
+        self.assertGreater(result["audio_confidence"], 0.5)
+        self.assertEqual(result["audio"], "master")
+        self.assertEqual(result["faded"], [])
+        # the joined file plays the master 0.3 s late, exactly like the picture's original sound
+        late = estimate_offset(self.d / "master.wav", out, seconds=6)
+        self.assertAlmostEqual(late["offset"], 0.3, delta=0.03)
+
+    def test_auto_start_refuses_a_master_that_does_not_match(self):
+        import subprocess
+
+        from stitch_segments import stitch
+
+        other = self.d / "other.wav"
+        subprocess.run([self.ff, "-hide_banner", "-v", "error", "-y", "-f", "lavfi", "-i",
+                        "anoisesrc=d=7:c=white:r=48000:seed=99", "-ac", "2", str(other)], check=True)
+        with self.assertRaisesRegex(RuntimeError, "Could not align the master"):
+            stitch(self.pieces, self.d / "x.mp4", audio=other, audio_start="auto")

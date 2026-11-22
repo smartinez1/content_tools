@@ -203,15 +203,36 @@ def write_sound(path: Path, pcm: bytes) -> None:
 
 
 def external_audio(ffmpeg: str, src: Path, dst: Path, start: float, seconds: float) -> bytes:
-    """The song's own master, cut to the length of the joined picture."""
+    """The song's own master, cut to the length of the joined picture.
+
+    ``start`` is where the picture begins inside the master. A negative value means the master
+    starts *before* the picture's sound would (e.g. it is 44 ms early), so that much silence is
+    laid first.
+    """
     if not src.is_file():
         raise RuntimeError(f"Audio file not found: {src}")
+    lead = max(0.0, -start)
     run(
-        [ffmpeg, "-v", "error", "-y", "-i", str(src), "-ss", f"{start:.3f}", "-t", f"{seconds:.3f}",
+        [ffmpeg, "-v", "error", "-y", "-i", str(src), "-ss", f"{max(0.0, start):.3f}",
+         "-t", f"{max(0.0, seconds - lead):.3f}",
          "-map", "0:a:0", "-ac", "2", "-ar", str(SR), "-c:a", "pcm_s16le", str(dst)],
         "ffmpeg (audio)",
     )
-    return trim_pad(dst, seconds)
+    pcm = b"\x00" * (round(lead * SR) * 4) + trim_pad(dst, max(0.0, seconds - lead))
+    need = round(seconds * SR) * 4
+    return pcm[:need] + b"\x00" * max(0, need - len(pcm))
+
+
+def estimate_audio_start(master: Path, first_piece: Path) -> dict:
+    """Where the picture starts inside the master, measured against the first piece's own sound.
+
+    Cross-correlates the first minute (the piece's fade-out is at its end, so it does not matter).
+    Returns ``{"audio_start", "confidence"}``; a negative start means the master is ahead.
+    """
+    from lyrics_sync import estimate_offset
+
+    found = estimate_offset(Path(master).expanduser(), Path(first_piece), seconds=60.0)
+    return {"audio_start": round(-found["offset"], 3), "confidence": found["confidence"]}
 
 
 def concat_line(path: Path) -> str:
@@ -224,7 +245,7 @@ def stitch(
     output,
     *,
     audio=None,
-    audio_start: float = 0.0,
+    audio_start: float | str = 0.0,
     reencode: bool = False,
     on_progress=None,
     cancel_check=None,
@@ -322,11 +343,21 @@ def stitch(
             check()
             sound = None
             faded: list[str] = []
+            audio_conf = None
             if audio:
+                if audio_start == "auto":
+                    report(0.50, "Aligning the master with the picture...")
+                    found = estimate_audio_start(Path(audio), files[0])
+                    if found["confidence"] < 0.15:
+                        raise RuntimeError(
+                            f"Could not align the master with the pieces (match {found['confidence']:.0%}); "
+                            "set the start by hand."
+                        )
+                    audio_start, audio_conf = found["audio_start"], found["confidence"]
                 report(0.55, "Laying the master audio under it...")
                 part = tmpdir / "master.wav"
                 pcm = external_audio(
-                    ffmpeg, Path(audio).expanduser(), part, audio_start, total
+                    ffmpeg, Path(audio).expanduser(), part, float(audio_start), total
                 )
                 sound = tmpdir / "sound.wav"
                 write_sound(sound, pcm)
@@ -377,6 +408,8 @@ def stitch(
         "height": info["height"],
         "size_mb": round(output.stat().st_size / (1024 * 1024), 1),
         "audio": "master" if audio else ("segments" if sound else "none"),
+        "audio_start": audio_start if audio else None,
+        "audio_confidence": audio_conf,
         "faded": faded,
     }
 
@@ -393,9 +426,10 @@ def main() -> None:
     )
     parser.add_argument(
         "--audio-start",
-        type=float,
+        type=lambda v: v if v == "auto" else float(v),
         default=0.0,
-        help="where the picture starts inside --audio, in seconds (default: 0)",
+        help="where the picture starts inside --audio, in seconds (default: 0; negative = the master "
+             "is ahead; 'auto' measures it from the first piece)",
     )
     parser.add_argument(
         "--reencode",

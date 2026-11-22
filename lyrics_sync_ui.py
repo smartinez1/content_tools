@@ -1446,7 +1446,7 @@ def stitch_sources(folder: str | None = None):
         "folder": _rel(base),
         "groups": groups,
         "masters": masters,
-        "defaults": {"audio_start": 0.0, "reencode": False},
+        "defaults": {"audio_start": "auto", "reencode": False},
     }
 
 
@@ -1480,11 +1480,17 @@ def start_stitch(payload: dict = Body(...)):
         if not audio_path.is_file():
             raise HTTPException(status_code=404, detail=f"Audio not found: {_rel(audio_path)}")
 
-    try:
-        audio_start = float(payload.get("audio_start") or 0)
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="audio_start must be a number")
-    audio_start = max(0.0, audio_start)
+    raw_start = payload.get("audio_start") or 0
+    if raw_start == "auto":
+        audio_start = "auto"  # measured from the first piece while joining
+    else:
+        try:
+            audio_start = float(raw_start)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="audio_start must be a number or 'auto'")
+        if not math.isfinite(audio_start):
+            raise HTTPException(status_code=400, detail="audio_start must be a number or 'auto'")
+        audio_start = max(-MAX_TIME_OFFSET * 2, audio_start)
 
     output = _inside_project(payload.get("output"), folder / "joined" / f"{group}.mp4")
     if output.suffix.lower() != ".mp4":
@@ -1526,8 +1532,13 @@ def start_stitch(payload: dict = Body(...)):
                 f"Done: {result['seconds']:.2f} s, {result['frames']} frames, "
                 f"{result['width']}x{result['height']} @ {result['fps']:g} fps."
             )
-            if result["faded"]:
-                job.message += " Warning: some pieces end with Oto's fade-out."
+            if result["audio"] == "master" and result["audio_confidence"] is not None:
+                job.message += (
+                    f" Master aligned automatically ({result['audio_start']:+.3f} s, "
+                    f"{result['audio_confidence']:.0%} match)."
+                )
+            if result["faded"] and result["audio"] != "master":
+                job.message += " Warning: some pieces end with Oto's fade-out (use the song master as the sound)."
             job.output_url = f"/api/video/stitch?path={quote(_rel(output))}"
             job.result = result
         except StitchCancelled:

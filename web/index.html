@@ -457,12 +457,14 @@
 
       <div class="panel-section">
         <div class="section-title"><span>Sound</span></div>
-        <label class="switch-label"><input type="radio" name="stitchAudio" value="pieces" checked> Pieces' own sound (sample-accurate joins)</label>
-        <label class="switch-label"><input type="radio" name="stitchAudio" value="master"> Song master (use if the pieces were exported with a fade)</label>
+        <label class="switch-label"><input type="radio" name="stitchAudio" value="pieces"> Pieces' own sound (sample-accurate joins, only if exported with <b>No fade</b>)</label>
+        <label class="switch-label"><input type="radio" name="stitchAudio" value="master" checked> Song master (recommended: Oto's default fade-out leaves a dip at every join)</label>
         <select id="stitchMaster" class="full-select" disabled><option value="">No masters in wav_files/</option></select>
+        <label class="switch-label" title="Measures where the picture starts inside the master by comparing it with the first piece's sound">
+          <input type="checkbox" id="stitchAudioAuto" checked disabled> Align the master automatically</label>
         <div class="fx-row">
-          <label for="stitchAudioStart">Picture starts at (s) in the master</label>
-          <input type="number" id="stitchAudioStart" class="text-input" value="0" min="0" step="0.01" disabled>
+          <label for="stitchAudioStart">Picture starts at (s) in the master (negative: the master is ahead)</label>
+          <input type="number" id="stitchAudioStart" class="text-input" value="0" step="0.001" disabled>
         </div>
         <label class="switch-label" title="Slower; use it when the pieces have different size, frame rate or codec settings">
           <input type="checkbox" id="stitchReencode"> Re-encode (slow, tolerates mismatched pieces)</label>

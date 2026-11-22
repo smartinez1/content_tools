@@ -14,6 +14,7 @@
     groupNote: $("stitchGroupNote"),
     master: $("stitchMaster"),
     audioStart: $("stitchAudioStart"),
+    audioAuto: $("stitchAudioAuto"),
     reencode: $("stitchReencode"),
     outJoined: $("stitchOutJoined"),
     outMobile: $("stitchOutMobile"),
@@ -107,6 +108,8 @@
     order = g ? g.segments.map((seg) => ({ seg, on: true })) : [];
     // the song's master, when one matches the group name
     if (g?.audio) els.master.value = g.audio.path;
+    // Oto fades every export out unless told not to, so the matching master is the safe default
+    document.querySelector(`input[name="stitchAudio"][value="${g?.audio ? "master" : "pieces"}"]`).checked = true;
     renderSegments();
     renderSide();
   }
@@ -181,7 +184,7 @@
     if (radio("stitchAudio") === "master" && data) {
       const m = data.masters.find((x) => x.path === els.master.value);
       if (!m) warns.push("Pick a song master, or switch to the pieces' own sound.");
-      else if (m.seconds - Number(els.audioStart.value || 0) < total - 0.05) {
+      else if (!els.audioAuto.checked && m.seconds - Number(els.audioStart.value || 0) < total - 0.05) {
         warns.push(`The master (${fmtDur(m.seconds)}) is shorter than the picture (${fmtDur(total)}); the sound will end early.`);
       }
     }
@@ -214,7 +217,8 @@
 
     const useMaster = radio("stitchAudio") === "master";
     els.master.disabled = !useMaster || !data?.masters.length;
-    els.audioStart.disabled = !useMaster;
+    els.audioAuto.disabled = !useMaster;
+    els.audioStart.disabled = !useMaster || els.audioAuto.checked;
     updateButtons();
   }
 
@@ -241,7 +245,7 @@
     };
     if (useMaster) {
       payload.audio = els.master.value;
-      payload.audio_start = Number(els.audioStart.value) || 0;
+      payload.audio_start = els.audioAuto.checked ? "auto" : Number(els.audioStart.value) || 0;
     }
     try {
       const res = await fetch("/api/stitch", {
@@ -313,6 +317,7 @@
     );
     els.master.addEventListener("change", renderSide);
     els.audioStart.addEventListener("input", renderSide);
+    els.audioAuto.addEventListener("change", renderSide);
     els.btnStitch.addEventListener("click", join);
     els.btnCancel.addEventListener("click", () => {
       if (jobId) fetch(`/api/jobs/${jobId}/cancel`, { method: "POST" });
