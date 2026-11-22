@@ -122,6 +122,92 @@ const karaokeTag = document.getElementById("karaokeTag");
 
 // Aesthetic toggles
 const lofiMasterToggle = document.getElementById("lofiMasterToggle");
+const safeAreaToggle = document.getElementById("safeAreaToggle");
+const safeTop = document.getElementById("safeTop");
+const safeBottom = document.getElementById("safeBottom");
+const safeSides = document.getElementById("safeSides");
+const safeReadout = document.getElementById("safeReadout");
+const reelsToggle = document.getElementById("reelsToggle");
+const safeGuidesToggle = document.getElementById("safeGuidesToggle");
+const reelsOverlay = document.getElementById("reelsOverlay");
+
+// Output formats (/api/formats). Everything the UI computes in "script pixels" (caption position,
+// safe area, line fitting) uses the format's reference canvas RW x RH: 1080x1920 for mobile,
+// 1920x1080 for YouTube (libass scales it to the real file, even a 4K one).
+const BUILTIN_FORMATS = [
+  { id: "mobile", label: "Mobile 9:16", ref_w: 1080, ref_h: 1920, subdir: "",
+    safe_area: { top: 130, bottom: 260, sides: 50 }, safe_limits: { top: 500, bottom: 500, sides: 250 },
+    safe_default_on: true },
+  { id: "youtube", label: "YouTube 16:9", ref_w: 1920, ref_h: 1080, subdir: "youtube",
+    safe_area: { top: 54, bottom: 54, sides: 96 }, safe_limits: { top: 300, bottom: 300, sides: 500 },
+    safe_default_on: false },
+];
+let formats = BUILTIN_FORMATS;
+let FORMAT = formats[0];
+let RW = FORMAT.ref_w;
+let RH = FORMAT.ref_h;
+const fmtQuery = () => `format=${encodeURIComponent(FORMAT.id)}`;
+
+// Social safe area: margins (px of the reference frame) the whole picture is shrunk to fit inside.
+// Mirrors lyrics_sync.parse_safe_area / safe_area_style so the preview matches the render.
+let safeDefaults = { ...FORMAT.safe_area };
+let safeState = { enabled: FORMAT.safe_default_on, ...safeDefaults };
+let stageSafe = null; // the safe area the picture currently on the stage was rendered with
+
+// One saved setting per format (the mobile one used to live under the plain "safeAreaCfg" key).
+const safeKey = (id) => (id === "mobile" ? "safeAreaCfg" : `safeAreaCfg.${id}`);
+function loadSafeState() {
+  safeDefaults = { ...FORMAT.safe_area };
+  safeState = { enabled: FORMAT.safe_default_on, ...safeDefaults };
+  try {
+    const saved = JSON.parse(localStorage.getItem(safeKey(FORMAT.id)) || "null");
+    if (saved && typeof saved === "object") {
+      for (const k of ["top", "bottom", "sides"]) {
+        if (Number.isFinite(saved[k])) safeState[k] = saved[k];
+      }
+      if (typeof saved.enabled === "boolean") safeState.enabled = saved.enabled;
+    }
+  } catch (_) {}
+}
+loadSafeState();
+
+function safePayload() {
+  return safeState.enabled
+    ? { top: safeState.top, bottom: safeState.bottom, sides: safeState.sides }
+    : false;
+}
+
+// Where the shrunk picture sits, in reference-frame pixels (same maths as _safe_area_origin).
+function safeGeometry(sa) {
+  const boxW = (RW - 2 * sa.sides) / RW;
+  const boxH = (RH - sa.top - sa.bottom) / RH;
+  const s = Math.min(boxW, boxH);
+  return { s, x0: sa.sides + (boxW * RW - s * RW) / 2, y0: sa.top + (boxH * RH - s * RH) / 2, boxW, boxH };
+}
+
+function syncSafeControls() {
+  safeAreaToggle.checked = safeState.enabled;
+  safeTop.value = safeState.top;
+  safeBottom.value = safeState.bottom;
+  safeSides.value = safeState.sides;
+  document.getElementById("safeTopVal").textContent = safeState.top;
+  document.getElementById("safeBottomVal").textContent = safeState.bottom;
+  document.getElementById("safeSidesVal").textContent = safeState.sides;
+  [safeTop, safeBottom, safeSides].forEach((el) => (el.disabled = !safeState.enabled));
+  if (safeState.enabled) {
+    const g = safeGeometry(safeState);
+    safeReadout.textContent =
+      `Picture shrinks to ${Math.round(g.s * 100)}% (${Math.round(g.s * RW)}\u00d7${Math.round(g.s * RH)} px).`;
+  } else {
+    safeReadout.textContent = "Off: the full frame is exported.";
+  }
+}
+
+function saveSafeState() {
+  try {
+    localStorage.setItem(safeKey(FORMAT.id), JSON.stringify(safeState));
+  } catch (_) {}
+}
 const fxControls = document.getElementById("fxControls");
 const btnFxFrame = document.getElementById("btnFxFrame");
 const btnFxClip = document.getElementById("btnFxClip");
@@ -186,12 +272,13 @@ function setTimeOffset(value, { persist = true } = {}) {
   if (persist && currentSong) {
     // Saved on the server (.lyrics_sync/song_settings.json), debounced while the slider drags.
     const song = currentSong;
+    const fmtId = FORMAT.id;
     clearTimeout(offsetSaveTimer);
     offsetSaveTimer = setTimeout(() => {
       fetch(`/api/song-settings/${encodeURIComponent(song)}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ time_offset: v }),
+        body: JSON.stringify({ time_offset: v, format: fmtId }),
       }).catch(() => { /* offline: the value still applies for this session */ });
     }, 300);
   }
@@ -202,11 +289,11 @@ async function restoreSongOffset(song) {
   setTimeOffset(0, { persist: false });
   let saved = 0;
   try {
-    const res = await fetch(`/api/song-settings/${encodeURIComponent(song)}`);
+    const res = await fetch(`/api/song-settings/${encodeURIComponent(song)}?${fmtQuery()}`);
     if (res.ok) saved = Number((await res.json()).time_offset) || 0;
   } catch (_) { /* ignore */ }
   // One-time move of offsets that older versions kept in this browser.
-  if (!saved) {
+  if (!saved && FORMAT.id === "mobile") {
     try {
       const legacy = Number(localStorage.getItem(offsetKey(song))) || 0;
       if (legacy) {
@@ -218,6 +305,51 @@ async function restoreSongOffset(song) {
     } catch (_) { /* ignore */ }
   }
   if (song === currentSong) setTimeOffset(saved, { persist: false });
+  // First time this song is opened in a non-mobile format: measure the offset to the mobile video.
+  if (!saved && FORMAT.id !== "mobile" && song === currentSong && !detectedBefore(song)) {
+    detectOffset({ auto: true });
+  }
+}
+
+const detectedKey = (song) => `ct.offsetDetected:${song}:${FORMAT.id}`;
+function detectedBefore(song) {
+  try { return localStorage.getItem(detectedKey(song)) === "1"; } catch (_) { return false; }
+}
+
+// Compare this format's soundtrack with the mobile video the lyrics were aligned on.
+async function detectOffset({ auto = false } = {}) {
+  const song = currentSong;
+  const fmtId = FORMAT.id;
+  const status = document.getElementById("offsetDetectStatus");
+  const btn = document.getElementById("btnDetectOffset");
+  if (!song || fmtId === "mobile") return;
+  status.hidden = false;
+  status.textContent = "Measuring the offset to the mobile video...";
+  btn.disabled = true;
+  try {
+    const res = await fetch(`/api/song-settings/${encodeURIComponent(song)}/detect-offset`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ format: fmtId }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
+    if (song !== currentSong || fmtId !== FORMAT.id) return; // the user moved on
+    try { localStorage.setItem(detectedKey(song), "1"); } catch (_) { /* ignore */ }
+    const sign = body.offset > 0 ? "+" : "";
+    const conf = `confidence ${Math.round(body.confidence * 100)}%`;
+    if (body.reliable) {
+      setTimeOffset(body.offset);
+      status.textContent = `Detected ${sign}${body.offset.toFixed(2)} s (${conf}) and applied.`;
+    } else {
+      status.textContent = `Could not match the sound reliably (${sign}${body.offset.toFixed(2)} s, ${conf}); offset left unchanged, adjust it by ear.`;
+    }
+  } catch (err) {
+    if (auto) status.hidden = true; // e.g. there is no mobile video to compare with: stay quiet
+    else status.textContent = `Detect failed: ${err.message}`;
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // Initialize app
@@ -225,12 +357,14 @@ document.addEventListener("DOMContentLoaded", async () => {
   await loadFonts();
   await initAesthetics();
   await loadPresets();
+  await initFormats();
   await loadSongs();
   setupEventListeners();
   setupLineEditor();
   setupDragReposition();
   setupOverlayTracking();
   setupPanels();
+  setupSafeArea();
 });
 
 // The caption overlay is positioned in pixels from the video's on-screen box, so it must be
@@ -269,7 +403,217 @@ function hideStageFx() {
   if (fxFrameAbort) fxFrameAbort.abort();
   clearTimeout(fxFrameTimer);
   stageFx.hidden = true;
+  stageSafe = null;
   fxFrameStatus.textContent = "";
+  updateOverlay();
+}
+
+// ---------------------------------------------------------------------------
+// Social safe area controls + Instagram Reels overlay
+function reelsSvg() {
+  const w = "#fff";
+  const icon = (x, y, scale, paths) =>
+    `<g transform="translate(${x - 12 * scale} ${y - 12 * scale}) scale(${scale})" fill="none" stroke="${w}" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">${paths}</g>`;
+  const count = (x, y, t) =>
+    `<text x="${x}" y="${y}" fill="${w}" font-size="30" font-weight="600" text-anchor="middle">${t}</text>`;
+  const nav = [108, 324, 540, 756, 972]
+    .map((x, i) =>
+      i === 2
+        ? `<rect x="${x - 34}" y="1822" width="68" height="68" rx="16" fill="none" stroke="${w}" stroke-width="4"/><path d="M${x - 8} 1840l22 12-22 12z" fill="${w}"/>`
+        : i === 4
+          ? `<circle cx="${x}" cy="1856" r="30" fill="#777" stroke="${w}" stroke-width="3"/>`
+          : `<circle cx="${x}" cy="1856" r="26" fill="none" stroke="${w}" stroke-width="4"/>`
+    )
+    .join("");
+  return `
+    <defs>
+      <linearGradient id="rlTop" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#000" stop-opacity=".5"/><stop offset="1" stop-color="#000" stop-opacity="0"/></linearGradient>
+      <linearGradient id="rlBot" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity=".7"/></linearGradient>
+    </defs>
+    <rect x="0" y="0" width="1080" height="300" fill="url(#rlTop)"/>
+    <rect x="0" y="1380" width="1080" height="540" fill="url(#rlBot)"/>
+    <g font-family="Helvetica, Arial, sans-serif">
+      <text x="70" y="76" fill="${w}" font-size="38" font-weight="700">9:41</text>
+      <rect x="930" y="48" width="68" height="32" rx="9" fill="none" stroke="${w}" stroke-width="3"/>
+      <rect x="936" y="54" width="48" height="20" rx="5" fill="${w}"/>
+      <text x="48" y="190" fill="${w}" font-size="62" font-weight="700">Reels</text>
+      ${icon(1010, 160, 4.2, '<rect x="3" y="7" width="18" height="13" rx="3"/><circle cx="12" cy="13.5" r="3.4"/><path d="M8 7l1.4-2.5h5.2L16 7"/>')}
+      ${icon(985, 1090, 4.6, '<path d="M12 21s-7-4.5-9.5-9C.8 8.3 3 4.5 6.7 4.5c2 0 3.6 1 5.3 3 1.7-2 3.3-3 5.3-3 3.7 0 5.9 3.8 4.2 7.5C19 16.5 12 21 12 21z"/>')}
+      ${count(985, 1170, "12.4K")}
+      ${icon(985, 1262, 4.6, '<path d="M21 11.5a8.5 8.5 0 0 1-12.4 7.5L3 20.5l1.6-5A8.5 8.5 0 1 1 21 11.5z"/>')}
+      ${count(985, 1342, "318")}
+      ${icon(985, 1432, 4.6, '<path d="M22 3L2 10.5l7.5 3L12.5 21 22 3zM9.500 13.5L22 3"/>')}
+      ${count(985, 1512, "2.1K")}
+      ${icon(985, 1600, 4.6, '<circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/>')}
+      <rect x="945" y="1655" width="80" height="80" rx="18" fill="#444" stroke="${w}" stroke-width="5"/>
+      <circle cx="96" cy="1540" r="50" fill="#555" stroke="${w}" stroke-width="4"/>
+      <text x="170" y="1552" fill="${w}" font-size="42" font-weight="700">oto</text>
+      <rect x="290" y="1512" width="160" height="60" rx="16" fill="none" stroke="${w}" stroke-width="3"/>
+      <text x="370" y="1554" fill="${w}" font-size="32" font-weight="600" text-anchor="middle">Follow</text>
+      <text x="48" y="1642" fill="${w}" font-size="38">new snippet out 20.11 &#127925; stream it everywhere</text>
+      <text x="48" y="1692" fill="${w}" font-size="38" opacity=".75">... more</text>
+      <rect x="48" y="1722" width="420" height="58" rx="29" fill="#fff" fill-opacity=".22"/>
+      <text x="76" y="1762" fill="${w}" font-size="32">&#9835; Original audio</text>
+      <rect x="0" y="1790" width="1080" height="130" fill="#000" fill-opacity=".92"/>
+      ${nav}
+    </g>`;
+}
+
+// YouTube player (1920x1080 reference): title bar, control bar with the progress line, branding
+// watermark, and optionally the end-screen element layout (last 5-20 s of the video).
+function youtubeSvg() {
+  const w = "#fff";
+  const end = document.getElementById("ytEndToggle")?.checked;
+  const ico = (x, y, paths, sw = 3, sc = 1) =>
+    `<g transform="translate(${x} ${y}) scale(${sc})" fill="none" stroke="${w}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round">${paths}</g>`;
+  const dashed = (x, y, wd, ht, label, rx = 8) =>
+    `<rect x="${x}" y="${y}" width="${wd}" height="${ht}" rx="${rx}" fill="#fff" fill-opacity=".08" stroke="${w}" stroke-width="3" stroke-dasharray="16 10"/>` +
+    `<text x="${x + wd / 2}" y="${y + ht / 2 + 8}" fill="${w}" font-size="26" text-anchor="middle" opacity=".85">${label}</text>`;
+  return `
+    <defs>
+      <linearGradient id="ytTop" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#000" stop-opacity=".65"/><stop offset="1" stop-color="#000" stop-opacity="0"/></linearGradient>
+      <linearGradient id="ytBot" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity=".75"/></linearGradient>
+    </defs>
+    <rect x="0" y="0" width="1920" height="170" fill="url(#ytTop)"/>
+    <rect x="0" y="880" width="1920" height="200" fill="url(#ytBot)"/>
+    <g font-family="Roboto, Helvetica, Arial, sans-serif">
+      <text x="56" y="82" fill="${w}" font-size="40" font-weight="500">espacio tiempo (2am)</text>
+      ${ico(1700, 50, '<circle cx="12" cy="12" r="10"/><path d="M12 7v5l3 2"/>', 3)}
+      ${ico(1800, 54, '<circle cx="12" cy="5" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="12" cy="19" r="1.4"/>', 4)}
+      <rect x="48" y="1004" width="1824" height="6" rx="3" fill="#fff" fill-opacity=".3"/>
+      <rect x="48" y="1004" width="640" height="6" rx="3" fill="#f00"/>
+      <circle cx="688" cy="1007" r="13" fill="#f00"/>
+      <path d="M62 1040l26 16-26 16z" fill="${w}"/>
+      ${ico(122, 1038, '<path d="M3 9v6h4l5 4V5L7 9z"/><path d="M16 8a5 5 0 0 1 0 8"/>', 2.4, 1.4)}
+      <text x="214" y="1068" fill="${w}" font-size="28">2:14 / 3:40</text>
+      ${ico(1616, 1038, '<rect x="2" y="5" width="20" height="14" rx="3"/><path d="M6 11h4M14 11h4M6 15h8"/>', 2, 1.5)}
+      ${ico(1690, 1038, '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/>', 2, 1.5)}
+      ${ico(1764, 1038, '<rect x="3" y="6" width="18" height="12" rx="2"/><path d="M12 12h6"/>', 2, 1.5)}
+      ${ico(1830, 1038, '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>', 2, 1.5)}
+      ${dashed(1748, 800, 124, 124, "logo", 62)}
+      ${end ? dashed(96, 250, 640, 360, "video") + dashed(1184, 250, 640, 360, "video") + `<circle cx="960" cy="430" r="96" fill="#fff" fill-opacity=".08" stroke="${w}" stroke-width="3" stroke-dasharray="16 10"/><text x="960" y="438" fill="${w}" font-size="26" text-anchor="middle" opacity=".85">subscribe</text>` : ""}
+    </g>`;
+}
+
+function renderReelsOverlay() {
+  const showReels = reelsToggle.checked;
+  const showBox = safeGuidesToggle.checked;
+  reelsOverlay.hidden = !(showReels || showBox);
+  if (reelsOverlay.hidden) return;
+  let inner = showReels ? (FORMAT.id === "mobile" ? reelsSvg() : youtubeSvg()) : "";
+  if (showBox) {
+    const g = safeGeometry(safeState);
+    inner += `<rect x="${safeState.sides}" y="${safeState.top}" width="${RW - 2 * safeState.sides}" height="${RH - safeState.top - safeState.bottom}" fill="none" stroke="#22d3ee" stroke-width="4" stroke-dasharray="22 14"/>`;
+  }
+  reelsOverlay.innerHTML = `<svg viewBox="0 0 ${RW} ${RH}" preserveAspectRatio="none">${inner}</svg>`;
+  updateOverlay();
+}
+
+// ---------------------------------------------------------------------------
+// Output formats (Mobile 9:16 / YouTube 16:9)
+async function initFormats() {
+  try {
+    const r = await fetch("/api/formats");
+    if (r.ok) {
+      const d = await r.json();
+      if (d.formats && d.formats.length) formats = d.formats;
+    }
+  } catch (_) { /* built-in definitions are used */ }
+  let saved = "mobile";
+  try { saved = localStorage.getItem("ct.format") || "mobile"; } catch (_) { /* ignore */ }
+  renderFormatSwitch();
+  setFormat(formats.some((f) => f.id === saved) ? saved : formats[0].id, { reload: false });
+}
+
+function renderFormatSwitch() {
+  const box = document.getElementById("formatSwitch");
+  if (!box) return;
+  box.replaceChildren(
+    ...formats.map((f) => {
+      const b = document.createElement("button");
+      b.className = "fmt-btn";
+      b.dataset.format = f.id;
+      b.textContent = f.label;
+      b.addEventListener("click", () => f.id !== FORMAT.id && setFormat(f.id));
+      return b;
+    })
+  );
+}
+
+// Each format keeps its own caption look (a mobile 48 px / 760 px-margin style makes no sense on the
+// 1920x1080 canvas). The first time a format is used it starts from the current look plus the
+// format's caption defaults.
+const STYLE_STORE_KEY = "ct.styleByFormat";
+function readStyleStore() {
+  try { return JSON.parse(localStorage.getItem(STYLE_STORE_KEY) || "{}") || {}; } catch (_) { return {}; }
+}
+function swapCaptionStyle(prevId, next) {
+  const store = readStyleStore();
+  if (prevId) {
+    const { time_offset: _o, ...look } = styleState;
+    store[prevId] = look;
+    try { localStorage.setItem(STYLE_STORE_KEY, JSON.stringify(store)); } catch (_) { /* ignore */ }
+  }
+  if (store[next.id]) applyStyle(store[next.id]);
+  else if (next.caption_defaults && Object.keys(next.caption_defaults).length) {
+    applyStyle(next.caption_defaults);
+  }
+}
+
+function setFormat(id, { reload = true } = {}) {
+  const prevId = FORMAT.id;
+  FORMAT = formats.find((f) => f.id === id) || formats[0];
+  swapCaptionStyle(reload ? prevId : "", FORMAT);
+  RW = FORMAT.ref_w;
+  RH = FORMAT.ref_h;
+  try { localStorage.setItem("ct.format", FORMAT.id); } catch (_) { /* ignore */ }
+  document.querySelectorAll(".fmt-btn").forEach((b) => b.classList.toggle("active", b.dataset.format === FORMAT.id));
+  loadSafeState();
+  safeTop.max = FORMAT.safe_limits.top;
+  safeBottom.max = FORMAT.safe_limits.bottom;
+  safeSides.max = FORMAT.safe_limits.sides;
+  const mobile = FORMAT.id === "mobile";
+  document.getElementById("overlayLabelText").textContent = mobile ? "Instagram Reels overlay" : "YouTube player overlay";
+  document.getElementById("ytEndLabel").hidden = mobile;
+  document.getElementById("offsetDetectRow").hidden = mobile;
+  document.getElementById("offsetDetectStatus").hidden = true;
+  document.dispatchEvent(new CustomEvent("ct:format", { detail: FORMAT.id }));
+  syncSafeControls();
+  renderReelsOverlay();
+  if (reload) {
+    hideStageFx();
+    loadSongs();
+  }
+}
+
+function setupSafeArea() {
+  const onChange = () => {
+    syncSafeControls();
+    saveSafeState();
+    renderReelsOverlay();
+    if (!safeState.enabled && !fxAutoRefresh.checked) hideStageFx();
+    else scheduleFxFrame();
+  };
+  safeAreaToggle.addEventListener("change", () => {
+    safeState.enabled = safeAreaToggle.checked;
+    onChange();
+  });
+  [[safeTop, "top"], [safeBottom, "bottom"], [safeSides, "sides"]].forEach(([el, key]) => {
+    el.addEventListener("input", () => {
+      safeState[key] = parseInt(el.value, 10);
+      onChange();
+    });
+  });
+  document.getElementById("btnSafeReset").addEventListener("click", () => {
+    Object.assign(safeState, safeDefaults);
+    onChange();
+  });
+  reelsToggle.addEventListener("change", renderReelsOverlay);
+  document.getElementById("ytEndToggle").addEventListener("change", renderReelsOverlay);
+  document.getElementById("btnDetectOffset").addEventListener("click", () => detectOffset());
+  safeGuidesToggle.addEventListener("change", renderReelsOverlay);
+  syncSafeControls();
+  renderReelsOverlay();
 }
 
 function setupPanels() {
@@ -352,7 +696,7 @@ async function presetRequest(url, method, body) {
 
 async function loadSongs() {
   try {
-    const res = await fetch("/api/songs");
+    const res = await fetch(`/api/songs?${fmtQuery()}`);
     const data = await res.json();
     songSelect.innerHTML = '<option value="">-- Choose Song --</option>';
     data.songs.forEach((s) => {
@@ -363,10 +707,15 @@ async function loadSongs() {
       songSelect.appendChild(opt);
     });
 
-    const firstPlayable = data.songs.find((s) => s.video_path);
-    if (firstPlayable) {
-      songSelect.value = firstPlayable.name;
-      selectSong(firstPlayable.name);
+    // keep the current song when the new format has it, otherwise the first playable one
+    const pick = data.songs.find((s) => s.name === currentSong && s.video_path) || data.songs.find((s) => s.video_path);
+    if (pick) {
+      songSelect.value = pick.name;
+      selectSong(pick.name);
+    } else {
+      mainVideo.removeAttribute("src");
+      mainVideo.load();
+      hideStageFx();
     }
   } catch (err) {
     console.error("Failed to load songs:", err);
@@ -389,7 +738,7 @@ async function selectSong(songName) {
   songStatusBadge.textContent = "Loading...";
   songStatusBadge.className = "status-badge";
 
-  mainVideo.src = `/api/video/source/${encodeURIComponent(songName)}`;
+  mainVideo.src = `/api/video/source/${encodeURIComponent(songName)}?${fmtQuery()}`;
   mainVideo.load();
 
   try {
@@ -534,9 +883,17 @@ function applyAesthetics(fx) {
 }
 
 function scheduleFxFrame() {
-  if (!fxAutoRefresh.checked || !currentSong) return;
+  if (!currentSong) return;
+  // With the safe area on the stage must always show the shrunk picture (the caption overlay is
+  // placed on it), even when FX auto-refresh is off.
+  if (!fxAutoRefresh.checked && !safeState.enabled) return;
   clearTimeout(fxFrameTimer);
-  fxFrameTimer = setTimeout(renderFxFrame, 350);
+  fxFrameTimer = setTimeout(() => (fxAutoRefresh.checked ? renderFxFrame() : renderSafeFrame()), 350);
+}
+
+function renderSafeFrame() {
+  const t = stageTime();
+  return showStageFx("/api/fx-frame", { time_sec: t, apply_fx: false }, `frame at ${t.toFixed(1)}s (safe area)`);
 }
 
 // The frame to show: the scrubbed time, or just inside the first line when nothing is chosen yet.
@@ -555,7 +912,14 @@ async function showStageFx(url, body, label) {
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ song_name: currentSong, aesthetics: aestheticState, ...body }),
+      body: JSON.stringify({
+        song_name: currentSong,
+        format: FORMAT.id,
+        aesthetics: aestheticState,
+        safe_area: safePayload(),
+        apply_fx: aestheticState.enabled,
+        ...body,
+      }),
       signal: fxFrameAbort.signal,
     });
     if (mine !== fxFrameReq) return;
@@ -569,6 +933,7 @@ async function showStageFx(url, body, label) {
     fxFrameUrl = URL.createObjectURL(blob);
     stageFx.src = fxFrameUrl;
     stageFx.hidden = false;
+    stageSafe = safeState.enabled ? { ...safeState } : null;
     fxFrameStatus.textContent = label;
     updateOverlay();
   } catch (err) {
@@ -830,20 +1195,20 @@ function setupLineEditor() {
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
-// Where the caption sits, in 1080x1920 render space: the explicit drag/slider position when set,
+// Where the caption sits, in the format's reference render space: the explicit drag/slider position when set,
 // otherwise the alignment grid + bottom margin (same rules the overlay has always used).
 function effectivePos() {
   if (styleState.pos_x !== null && styleState.pos_y !== null) {
     return { x: styleState.pos_x, y: styleState.pos_y };
   }
   const al = styleState.alignment;
-  let x = 540;
-  if ([7, 4, 1].includes(al)) x = 0.15 * 1080;
-  else if ([9, 6, 3].includes(al)) x = 0.85 * 1080;
+  let x = RW / 2;
+  if ([7, 4, 1].includes(al)) x = 0.15 * RW;
+  else if ([9, 6, 3].includes(al)) x = 0.85 * RW;
   let y;
-  if ([7, 8, 9].includes(al)) y = 0.15 * 1920;
-  else if ([4, 5, 6].includes(al)) y = 0.5 * 1920;
-  else y = 1920 - styleState.margin_v;
+  if ([7, 8, 9].includes(al)) y = 0.15 * RH;
+  else if ([4, 5, 6].includes(al)) y = 0.5 * RH;
+  else y = RH - styleState.margin_v;
   return { x: Math.round(x), y: Math.round(y) };
 }
 
@@ -876,7 +1241,7 @@ function syncPositionControls() {
 
 // Live Subtitle Overlay Renderer
 // ---------------------------------------------------------------------------
-// Keep words whole (mirror of plan_line_fit in lyrics_sync.py, in 1080x1920 script pixels).
+// Keep words whole (mirror of plan_line_fit in lyrics_sync.py, in reference script pixels).
 // A word is only cut when it is wider than the text column. Order of preference: widen the column
 // for that line, then shrink the font, and only as a last resort split the word with a trailing "-".
 // ---------------------------------------------------------------------------
@@ -904,7 +1269,7 @@ function splitWord(word, size, maxWidth) {
 
 function baseMargins() {
   if (styleState.box_width) {
-    const side = Math.max(10, Math.floor((1080 - Number(styleState.box_width)) / 2));
+    const side = Math.max(10, Math.floor((RW - Number(styleState.box_width)) / 2));
     return [side, side];
   }
   return [styleState.margin_l ?? 70, styleState.margin_r ?? 70];
@@ -915,11 +1280,11 @@ function planLineFit(words) {
   const plan = { margins: [ml, mr], fontSize: styleState.font_size, chunks: {} };
   const widths = words.map((w) => measureScript(w, styleState.font_size) * FIT.safety);
   const widest = Math.max(0, ...widths);
-  if (widest <= 1080 - ml - mr) return plan;
+  if (widest <= RW - ml - mr) return plan;
 
-  const maxAvail = 1080 - 2 * FIT.minSide;
+  const maxAvail = RW - 2 * FIT.minSide;
   if (widest <= maxAvail) {
-    const side = Math.max(FIT.minSide, Math.floor((1080 - widest) / 2));
+    const side = Math.max(FIT.minSide, Math.floor((RW - widest) / 2));
     plan.margins = [Math.min(ml, side), Math.min(mr, side)];
     return plan;
   }
@@ -949,6 +1314,10 @@ function updateOverlay() {
   stageFx.style.top = `${mainVideo.offsetTop}px`;
   stageFx.style.width = `${mainVideo.clientWidth}px`;
   stageFx.style.height = `${mainVideo.clientHeight}px`;
+  reelsOverlay.style.left = stageFx.style.left;
+  reelsOverlay.style.top = stageFx.style.top;
+  reelsOverlay.style.width = stageFx.style.width;
+  reelsOverlay.style.height = stageFx.style.height;
 
   // This is a still frame used to place the caption, so show the closest line even in a gap.
   const t = mainVideo.currentTime - lyricOffset(); // lyric time
@@ -974,16 +1343,16 @@ function updateOverlay() {
   subOverlay.style.letterSpacing = `${styleState.letter_spacing}px`;
   subOverlay.style.opacity = styleState.text_opacity !== undefined ? styleState.text_opacity : 0.88;
 
-  // Scale font relative to container height vs 1920 reference video
+  // Scale font relative to the displayed height vs the format's reference height
   const vidHeight = mainVideo.clientHeight || videoContainer.clientHeight;
-  const scaleRatio = vidHeight / 1920;
+  const scaleRatio = vidHeight / RH;
   const computedFontSize = Math.max(3, plan.fontSize * scaleRatio);
   subOverlay.style.fontSize = `${computedFontSize}px`;
 
   // Scale subtitle box width to force blocky line wrapping
   const vidWidth = mainVideo.clientWidth || videoContainer.clientWidth;
-  const scaleRatioW = vidWidth / 1080;
-  subOverlay.style.maxWidth = `${Math.max(40, (1080 - plan.margins[0] - plan.margins[1]) * scaleRatioW)}px`;
+  const scaleRatioW = vidWidth / RW;
+  subOverlay.style.maxWidth = `${Math.max(40, (RW - plan.margins[0] - plan.margins[1]) * scaleRatioW)}px`;
 
   // Outline, Shadow & Chromatic simulation
   const strokePx = Math.max(0.4, styleState.outline * scaleRatio * 1.5);
@@ -1011,9 +1380,15 @@ function updateOverlay() {
   const offsetX = vidRect.left - contRect.left;
   const offsetY = vidRect.top - contRect.top;
 
-  const pos = effectivePos();
-  const xPct = (pos.x / 1080) * 100;
-  const yPct = (pos.y / 1920) * 100;
+  let pos = effectivePos();
+  if (stageSafe) {
+    // The picture on the stage is shrunk into the safe area, and the render moves the captions
+    // with it (size unchanged), so show them at the mapped spot.
+    const g = safeGeometry(stageSafe);
+    pos = { x: g.x0 + pos.x * g.s, y: g.y0 + pos.y * g.s };
+  }
+  const xPct = (pos.x / RW) * 100;
+  const yPct = (pos.y / RH) * 100;
 
   subOverlay.style.left = `${offsetX + (vidWidth * xPct) / 100}px`;
   subOverlay.style.top = `${offsetY + (vidHeight * yPct) / 100}px`;
@@ -1067,9 +1442,17 @@ function setupDragReposition() {
     const relX = Math.max(0, Math.min(vidRect.width, e.clientX - vidRect.left));
     const relY = Math.max(0, Math.min(vidRect.height, e.clientY - vidRect.top));
 
-    // Convert to 1080x1920 reference space
-    const refX = Math.round((relX / vidRect.width) * 1080);
-    const refY = Math.round((relY / vidRect.height) * 1920);
+    // Convert to the reference canvas
+    let refX = (relX / vidRect.width) * RW;
+    let refY = (relY / vidRect.height) * RH;
+    if (stageSafe) {
+      // Pointer is on the shrunk picture: convert back to the full-frame coordinates the style uses.
+      const g = safeGeometry(stageSafe);
+      refX = (refX - g.x0) / g.s;
+      refY = (refY - g.y0) / g.s;
+    }
+    refX = Math.round(Math.max(0, Math.min(RW, refX)));
+    refY = Math.round(Math.max(0, Math.min(RH, refY)));
 
     styleState.pos_x = refX;
     styleState.pos_y = refY;
@@ -1103,6 +1486,7 @@ function setupEventListeners() {
     }
   });
   // A new frame makes the FX picture stale: drop it, and re-render it when auto-refresh is on.
+  mainVideo.addEventListener("loadeddata", scheduleFxFrame);
   mainVideo.addEventListener("seeked", () => {
     hideStageFx();
     scheduleFxFrame();
@@ -1273,6 +1657,10 @@ function setupEventListeners() {
     const p = presets[e.target.value];
     updatePresetButtons();
     if (!p) return;
+    if (p.format && p.format !== FORMAT.id && p.style) {
+      const label = (formats.find((f) => f.id === p.format) || { label: p.format }).label;
+      if (!confirm(`This preset's caption layout was made for ${label}, but you are editing ${FORMAT.label}. Apply it anyway?`)) return;
+    }
     // A preset holds a caption style, FX settings, or both; apply whichever it has.
     if (p.style) applyStyle(p.style);
     if (p.aesthetics) applyAesthetics(p.aesthetics);
@@ -1293,6 +1681,7 @@ function setupEventListeners() {
     const ok = await presetRequest(`/api/presets/${encodeURIComponent(name)}`, "POST", {
       style: Object.fromEntries(Object.entries(styleState).filter(([k]) => k !== "time_offset")),
       aesthetics: aestheticState,
+      format: FORMAT.id,
     });
     if (ok) await loadPresets(name);
   });
@@ -1330,7 +1719,7 @@ function setupEventListeners() {
     }
     dirtySong = null; // discard unsaved edits; they would be overwritten anyway
     clearTimeout(saveTimer);
-    startJob("/api/align", { song_name: currentSong }, "Whisper Alignment", () => {
+    startJob("/api/align", { song_name: currentSong, format: FORMAT.id }, "Whisper Alignment", () => {
       selectSong(currentSong);
     });
   });
@@ -1353,9 +1742,11 @@ function setupEventListeners() {
       "/api/preview",
       {
         song_name: currentSong,
+        format: FORMAT.id,
         style: styleState,
         aesthetics: aestheticState,
         apply_lofi: aestheticState.enabled,
+        safe_area: safePayload(),
         start_sec: startSec,
         duration_sec: PREVIEW_SECONDS,
       },
@@ -1381,9 +1772,11 @@ function setupEventListeners() {
       "/api/render",
       {
         song_name: currentSong,
+        format: FORMAT.id,
         style: styleState,
         aesthetics: aestheticState,
         lofi_mode: true,
+        safe_area: safePayload(),
       },
       "Full Lo-Fi Emo-Trap Render",
       () => {
@@ -1400,8 +1793,10 @@ function setupEventListeners() {
       "/api/render",
       {
         song_name: currentSong,
+        format: FORMAT.id,
         style: styleState,
         lofi_mode: false,
+        safe_area: safePayload(),
       },
       "Full Clean Video Render",
       () => {

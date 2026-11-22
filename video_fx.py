@@ -17,12 +17,14 @@ import math
 import shutil
 import subprocess
 import tempfile
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 
 import cv2
 import librosa
 import numpy as np
+
+from lyrics_sync import YOUTUBE_AUDIO_ARGS, video_encode_args
 
 BANDS = ("low", "mid", "high")
 
@@ -619,6 +621,28 @@ class FxContext:
     noise_pool: np.ndarray | None
 
 
+_PIXEL_KNOBS = (
+    "ca_shift_px", "ca_vertical_px", "ca_pulse", "glitch_max_shift", "glitch_slice_height",
+    "scanline_spacing", "scanline_thickness", "noise_size", "fog_blur",
+)
+
+
+def scale_fx_pixels(cfg: AestheticConfig, factor: float) -> AestheticConfig:
+    """Scale the knobs that are measured in pixels. They are tuned for a 1080 px short side, so a
+    4K frame (factor 2) gets 2x the shift/slices/grain and looks the same as the 1080p one."""
+    if abs(factor - 1.0) < 1e-6:
+        return cfg
+    changes = {}
+    for name in _PIXEL_KNOBS:
+        value = getattr(cfg, name)
+        scaled = value * factor
+        changes[name] = max(1, int(round(scaled))) if isinstance(value, int) and value > 0 else (
+            int(round(scaled)) if isinstance(value, int) else scaled
+        )
+    changes["scanline_thickness"] = min(changes["scanline_thickness"], max(1, changes["scanline_spacing"] - 1))
+    return replace(cfg, **changes)
+
+
 def build_fx_context(
     cfg: AestheticConfig,
     height: int,
@@ -626,6 +650,8 @@ def build_fx_context(
     rng: np.random.Generator | None = None,
 ) -> FxContext:
     """Precompute everything that does not change from frame to frame."""
+    # Only frames above 1080 px are scaled up; smaller ones (previews, tests) keep the knob values.
+    cfg = scale_fx_pixels(cfg, max(1.0, min(height, width) / 1080.0))
     if rng is None:
         rng = np.random.default_rng(cfg.seed if cfg.seed >= 0 else None)
     active = cfg.enabled
@@ -738,11 +764,19 @@ def process_video_lofi(
     preview_range: tuple[float, float] | None = None,
     on_progress=None,
     cancel_check=None,
+    render_scale: float | None = None,
+    encode_profile: str | None = None,
 ) -> Path:
     """Run the complete Lo-Fi Emo-Trap aesthetic video pipeline.
 
     Frames are read sequentially, processed, and piped straight into ffmpeg (libx264) together
     with the audio, so there is no lossy intermediate file.
+
+    ``render_scale`` runs the effects on a downscaled copy of each frame and upscales the result
+    back (Lanczos) before encoding. ``None`` = automatic: frames taller than 1080 px (4K masters)
+    are processed at 1080 px, which is about 4x cheaper and looks the same because the pixel-sized
+    knobs scale with the frame. ``encode_profile`` picks the output encoder settings
+    (``lyrics_sync.video_encode_args``); ``None`` keeps the original ones.
     """
     cfg = config or AestheticConfig()
     ffmpeg = find_ffmpeg()
@@ -776,21 +810,40 @@ def process_video_lofi(
         low_curve, mid_curve, high_curve = audio_curves(
             audio_file, start_sec, duration_sec, out_total_frames, cfg, out_fps, temp_dir
         )
-        ctx = build_fx_context(cfg, height, width)
+        short_side = min(width, height)
+        fx_scale = render_scale if render_scale is not None else min(1.0, 1080.0 / short_side)
+        fx_scale = min(1.0, max(0.1, float(fx_scale)))
+        if fx_scale < 0.999:
+            fx_w = max(2, int(round(width * fx_scale)) // 2 * 2)
+            fx_h = max(2, int(round(height * fx_scale)) // 2 * 2)
+        else:
+            fx_w, fx_h = width, height
+        ctx = build_fx_context(cfg, fx_h, fx_w)
 
         output_video.parent.mkdir(parents=True, exist_ok=True)
         stderr_path = temp_dir / "ffmpeg.log"
+        profile_args = video_encode_args(encode_profile)
+        if profile_args:
+            # raw BGR frames: convert with the BT.709 matrix to match the tags in the profile
+            out_args = [
+                "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2:out_color_matrix=bt709:out_range=tv",
+                *profile_args, *YOUTUBE_AUDIO_ARGS, "-shortest",
+            ]
+        else:
+            out_args = [
+                "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+                # The grain is incompressible; cap the bitrate so files stay a sensible size.
+                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                "-maxrate", "8M", "-bufsize", "16M", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "192k", "-shortest",
+            ]
         cmd = [
             ffmpeg, "-hide_banner", "-v", "error", "-y",
             "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{width}x{height}",
             "-framerate", f"{out_fps}", "-i", "-",
             "-ss", f"{start_sec:.3f}", "-t", f"{duration_sec:.3f}", "-i", str(audio_file),
             "-map", "0:v:0", "-map", "1:a:0?",
-            "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
-            # The grain is incompressible; cap the bitrate so files stay a sensible size.
-            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-            "-maxrate", "8M", "-bufsize", "16M", "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "192k", "-shortest",
+            *out_args,
             "-movflags", "+faststart",
             str(output_video),
         ]
@@ -816,12 +869,15 @@ def process_video_lofi(
                     frame = new_frame
                 # else: output rate above the source rate -> repeat the previous frame
 
+                work = frame if fx_w == width else cv2.resize(frame, (fx_w, fx_h), interpolation=cv2.INTER_AREA)
                 fx = apply_fx_frame(
-                    frame, ctx,
+                    work, ctx,
                     low_curve[i] if i < len(low_curve) else 0.0,
                     mid_curve[i] if i < len(mid_curve) else 0.0,
                     high_curve[i] if i < len(high_curve) else 0.0,
                 )
+                if fx_w != width:
+                    fx = cv2.resize(fx, (width, height), interpolation=cv2.INTER_LANCZOS4)
                 try:
                     proc.stdin.write(fx.tobytes())
                 except BrokenPipeError:
@@ -857,13 +913,32 @@ def process_video_lofi(
     return output_video
 
 
+def _fit_short_side(frame: np.ndarray, max_short_side: int | None) -> np.ndarray:
+    """Shrink a frame whose short side exceeds ``max_short_side`` (previews of 4K masters)."""
+    if not max_short_side:
+        return frame
+    h, w = frame.shape[:2]
+    short = min(h, w)
+    if short <= max_short_side:
+        return frame
+    k = max_short_side / float(short)
+    return cv2.resize(frame, (max(2, int(round(w * k))), max(2, int(round(h * k)))), interpolation=cv2.INTER_AREA)
+
+
 def render_fx_frame(
     video: Path,
     time_sec: float,
     config: AestheticConfig | None = None,
     window: float = 10.0,
+    frame_transform=None,
+    apply_fx: bool = True,
+    max_short_side: int | None = 1080,
 ) -> np.ndarray:
     """Return one source frame with the effect stack applied, for quick tuning.
+
+    ``frame_transform`` (BGR frame -> BGR frame) runs before the effects, like a stage that sits
+    ahead of them in the real render (the studio uses it for the social safe area); ``apply_fx=False``
+    returns just the transformed frame.
 
     The audio envelopes come from a ``window``-second slice centred on ``time_sec`` (the same kind
     of analysis a 10 s preview does). Glitch/noise use a fixed seed unless the config has one, so
@@ -885,6 +960,12 @@ def render_fx_frame(
             raise RuntimeError(f"Cannot read a frame at {time_sec:.2f}s")
     finally:
         cap.release()
+    frame = _fit_short_side(frame, max_short_side)
+    if frame_transform is not None:
+        frame = frame_transform(frame)
+    if not apply_fx:
+        return frame
+    height, width = frame.shape[:2]
 
     out_fps = cfg.target_fps if cfg.framerate_decimate else src_fps
     start = max(0.0, time_sec - window / 2.0)
@@ -907,6 +988,9 @@ def render_fx_clip(
     fps: float = 12.0,
     max_width: int = 270,
     window: float = 10.0,
+    frame_transform=None,
+    apply_fx: bool = True,
+    max_short_side: int | None = 1080,
 ) -> list[np.ndarray]:
     """Return a few consecutive frames with the effect stack applied, for a short animated preview.
 
@@ -923,6 +1007,9 @@ def render_fx_clip(
         total = (int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1) / src_fps
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        if max_short_side and min(height, width) > max_short_side:
+            k = max_short_side / float(min(height, width))
+            height, width = int(round(height * k)), int(round(width * k))  # same maths as _fit_short_side
         duration = min(max(float(duration), 0.2), max(total, 0.2))
         start_sec = min(max(float(start_sec), 0.0), max(total - duration, 0.0))
         fps = max(2.0, min(float(fps), src_fps))
@@ -932,8 +1019,9 @@ def render_fx_clip(
         a_start = max(0.0, start_sec + duration / 2.0 - window / 2.0)
         a_dur = max(min(window, total - a_start), duration)
         a_frames = max(1, int(a_dur * fps))
-        with tempfile.TemporaryDirectory(prefix="lofi_clip_") as tmp:
-            low, mid, high = audio_curves(video, a_start, a_dur, a_frames, cfg, fps, Path(tmp))
+        if apply_fx:
+            with tempfile.TemporaryDirectory(prefix="lofi_clip_") as tmp:
+                low, mid, high = audio_curves(video, a_start, a_dur, a_frames, cfg, fps, Path(tmp))
         offset = int(round((start_sec - a_start) * fps))
 
         rng = np.random.default_rng(cfg.seed if cfg.seed >= 0 else 0)
@@ -947,8 +1035,14 @@ def render_fx_clip(
             ret, frame = cap.read()
             if not ret or frame is None:
                 break
-            j = min(max(offset + i, 0), a_frames - 1)
-            fx = apply_fx_frame(frame, ctx, low[j], mid[j], high[j])
+            frame = _fit_short_side(frame, max_short_side)
+            if frame_transform is not None:
+                frame = frame_transform(frame)
+            if apply_fx:
+                j = min(max(offset + i, 0), a_frames - 1)
+                fx = apply_fx_frame(frame, ctx, low[j], mid[j], high[j])
+            else:
+                fx = frame
             frames.append(cv2.resize(fx, size, interpolation=cv2.INTER_AREA))
         if not frames:
             raise RuntimeError(f"Cannot read frames at {start_sec:.2f}s")

@@ -121,7 +121,7 @@ def transition_glitch(frame: np.ndarray, p: float, rng: np.random.Generator) -> 
     if p <= 0:
         return frame
     h, w = frame.shape[:2]
-    scale = w / 1080.0
+    scale = min(w, h) / 1080.0
     out = apply_chromatic_aberration(
         frame, shift_px=int(round((2 + 26 * p) * scale)), vertical_px=int(round(6 * p * scale))
     )
@@ -267,13 +267,22 @@ def build_end_card(width: int, height: int, logo_path: Path | None, text: str) -
             # The file exactly as given (uncropped, unkeyed, full width). The card takes the
             # file's own backdrop colour so the picture has no visible edge.
             card[:] = logo_background(logo)
+            # Full width, unless that would make it taller than the card (landscape): then it is
+            # fitted to 60% of the height and centred, on the file's own backdrop colour.
             lw = width
             lh = max(1, int(round(logo.shape[0] * lw / logo.shape[1])))
+            max_h = max(2, int(height * 0.6))
+            if lh > max_h:
+                lh = max_h
+                lw = max(2, min(width, int(round(logo.shape[1] * lh / logo.shape[0]))))
             logo = cv2.resize(logo, (lw, lh), interpolation=cv2.INTER_AREA)
-            y = int(height * 0.46) - lh // 2
+            x = (width - lw) // 2
+            y = max(0, int(height * 0.46) - lh // 2)
+            lh = min(lh, height - y)
+            logo = logo[:lh]
             mask = _edge_feather(lh, lw, max(4, lh // 12))
-            region = card[y:y + lh].astype(np.float32)
-            card[y:y + lh] = (region + (logo.astype(np.float32) - region) * mask).astype(np.uint8)
+            region = card[y:y + lh, x:x + lw].astype(np.float32)
+            card[y:y + lh, x:x + lw] = (region + (logo.astype(np.float32) - region) * mask).astype(np.uint8)
             logo_bottom = y + lh
             text_size = max(12, int(lh * 0.22))
     if text:

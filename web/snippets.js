@@ -38,6 +38,8 @@
     list: $("snipList"),
   };
   const NUDGE = 0.1;
+  // the studio's output format (Mobile / YouTube); FORMAT lives in app.js
+  const curFormat = () => (typeof FORMAT !== "undefined" ? FORMAT.id : "mobile");
   const TAB_KEY = "ct.activeTab";
   const settingsKey = (song) => `ct.snippet.${song}`;
 
@@ -53,18 +55,25 @@
   // ---------------- tabs ----------------
   function showTab(name) {
     const snip = name === "snippets";
-    els.layoutStudio.hidden = snip;
+    const stitch = name === "stitch";
+    els.layoutStudio.hidden = name !== "studio";
     els.layoutSnip.hidden = !snip;
-    if (els.songBar) els.songBar.hidden = snip;
+    const stitchLayout = $("stitchLayout");
+    if (stitchLayout) stitchLayout.hidden = !stitch;
+    if (els.songBar) els.songBar.hidden = name !== "studio";
     document.querySelectorAll(".tab-btn").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
     try { localStorage.setItem(TAB_KEY, name); } catch (_) { /* ignore */ }
-    if (snip) {
+    if (name !== "studio") {
       const main = document.getElementById("mainVideo");
       if (main && !main.paused) main.pause();
+    }
+    if (snip) {
       if (!loaded) init();
     } else {
       els.video.pause();
     }
+    // other tabs (stitch.js) hook in here
+    document.dispatchEvent(new CustomEvent("ct:tab", { detail: name }));
   }
 
   // ---------------- state <-> controls ----------------
@@ -174,7 +183,7 @@
   async function init() {
     loaded = true;
     try {
-      const res = await fetch("/api/snippet-sources");
+      const res = await fetch(`/api/snippet-sources?format=${curFormat()}`);
       const data = await res.json();
       sources = data.songs || [];
       defaults = data.defaults;
@@ -202,7 +211,7 @@
   function selectSong(name) {
     els.song.value = name;
     hideFrame();
-    els.video.src = `/api/video/snippet-source/${encodeURIComponent(name)}`;
+    els.video.src = `/api/video/snippet-source/${encodeURIComponent(name)}?format=${curFormat()}`;
     els.video.load();
     let saved = {};
     try { saved = JSON.parse(localStorage.getItem(settingsKey(name)) || "{}"); } catch (_) { saved = {}; }
@@ -211,7 +220,7 @@
 
   async function loadList() {
     try {
-      const res = await fetch("/api/snippets");
+      const res = await fetch(`/api/snippets?format=${curFormat()}`);
       const items = (await res.json()).snippets || [];
       els.list.innerHTML = items.length ? "" : '<div class="placeholder-msg">None yet.</div>';
       items.forEach((it) => {
@@ -253,7 +262,7 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          song_name: els.song.value, config: cfg,
+          song_name: els.song.value, config: cfg, format: curFormat(),
           time_sec: cfg.end - cfg.start + cfg.card_duration * 0.6,
         }),
       });
@@ -281,7 +290,7 @@
       const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ song_name: els.song.value, config: config() }),
+        body: JSON.stringify({ song_name: els.song.value, config: config(), format: curFormat() }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
@@ -477,5 +486,7 @@
     showTab(initial);
   }
 
+  // switching the studio's format re-reads the sources / exports of that format's folder
+  document.addEventListener("ct:format", () => { if (loaded) init(); });
   document.addEventListener("DOMContentLoaded", setup);
 })();

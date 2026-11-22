@@ -16,16 +16,16 @@ has a half-second fade-out and the joins will dip. In that case pass the song's
 master with --audio: it replaces the piece audio with one continuous track.
 
 Examples:
-    python3 scripts/stitch_segments.py "a - Compose 1.mp4" "a - Compose 2.mp4" -o "a - Compose.mp4"
-    python3 scripts/stitch_segments.py --dir ~/Downloads --prefix "a - Compose" -o full.mp4
-    python3 scripts/stitch_segments.py --dir parts --prefix "song - Compose" \\
+    python3 stitch_segments.py "a - Compose 1.mp4" "a - Compose 2.mp4" -o "a - Compose.mp4"
+    python3 stitch_segments.py --dir ~/Downloads --prefix "a - Compose" -o full.mp4
+    python3 stitch_segments.py --dir parts --prefix "song - Compose" \\
         --audio "wav_files/song.wav" -o "song - Compose.mp4"
 
 Use --reencode if the pieces came from different export settings; it decodes and
 re-encodes everything, which is slower but tolerant of mismatches.
 
-The Web Studio's Stitch tab calls stitch() from this module, so the command line
-and the UI always run the same pipeline.
+The Web Studio's Stitch tab (/api/stitch-sources, /api/stitch) calls stitch() from this
+module, so the command line and the UI always run the same pipeline.
 """
 
 import argparse

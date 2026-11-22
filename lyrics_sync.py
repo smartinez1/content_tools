@@ -37,7 +37,7 @@ import subprocess
 import sys
 import tempfile
 import unicodedata
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from functools import lru_cache
 from pathlib import Path
 
@@ -156,7 +156,7 @@ def normalise_name(name: str) -> str:
 
 # File-name markers for outputs, which must never be picked as source material:
 # rendered lyric videos ("<song> - lyrics.mp4") and promo snippets ("<song> - snippet ....mp4").
-NON_SOURCE_MARKERS = (" - lyrics", "_lyrics", " - snippet", "_snippet")
+NON_SOURCE_MARKERS = (" - lyrics", "_lyrics", " - snippet", "_snippet", ".part.")
 
 
 def find_closest(directory: Path, name: str, suffixes: set[str], exclude: tuple[str, ...] = ()) -> Path | None:
@@ -653,6 +653,54 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     return header + "\n".join(dialogues) + "\n"
 
 
+def _decode_mono(ffmpeg: str, media: Path, seconds: float, sr: int):
+    """First ``seconds`` of a file's audio as mono float32 at ``sr`` Hz."""
+    import numpy as np
+
+    proc = subprocess.run(
+        [ffmpeg, "-v", "error", "-i", str(media), "-t", f"{seconds:.3f}", "-vn", "-ac", "1",
+         "-ar", str(sr), "-f", "f32le", "-"],
+        capture_output=True,
+    )
+    if proc.returncode != 0 or not proc.stdout:
+        raise RuntimeError(f"Could not read the audio of {media.name}")
+    return np.frombuffer(proc.stdout, dtype=np.float32).copy()
+
+
+def estimate_offset(reference: Path, other: Path, seconds: float = 60.0, max_lag: float = 30.0,
+                    sr: int = 8000) -> dict:
+    """How much later (+) or earlier (-) ``other`` plays the same song than ``reference``.
+
+    Cross-correlates the first ``seconds`` of both soundtracks. The result is what the "Subtitle
+    Timing" offset of ``other`` should be so captions timed on ``reference`` line up: a caption at
+    reference time T shows at T + offset. ``confidence`` is the normalised correlation peak
+    (about 1 for the same audio, near 0 when nothing matches).
+    """
+    import numpy as np
+    from scipy.signal import correlate, correlation_lags
+
+    ffmpeg = find_ffmpeg()
+    a = _decode_mono(ffmpeg, reference, seconds, sr)
+    b = _decode_mono(ffmpeg, other, seconds, sr)
+    n = min(len(a), len(b))
+    if n < sr:
+        raise RuntimeError("Not enough audio to compare (need at least a second).")
+    a = a[:n] - a[:n].mean()
+    b = b[:n] - b[:n].mean()
+    norm = float(np.sqrt((a * a).sum() * (b * b).sum()))
+    if norm == 0.0:
+        raise RuntimeError("One of the videos is silent, so the offset can't be measured.")
+    corr = correlate(b, a, mode="full", method="fft")
+    lags = correlation_lags(len(b), len(a), mode="full")
+    keep = np.abs(lags) <= int(max_lag * sr)
+    corr, lags = corr[keep], lags[keep]
+    peak = int(np.argmax(corr))
+    return {
+        "offset": round(float(lags[peak]) / sr, 3),
+        "confidence": round(float(max(0.0, min(1.0, corr[peak] / norm))), 3),
+    }
+
+
 def get_duration(video: Path) -> float:
     try:
         import av
@@ -684,6 +732,177 @@ def verify_ffmpeg_has_ass(ffmpeg_exe: str | None = None) -> bool:
         return False
 
 
+# Output formats. ``ref`` is the reference canvas (script pixels) that captions, ASS ``PlayRes`` and
+# the studio's overlay maths use; libass scales it to the real file, so a 3840x2160 YouTube master
+# is laid out as 1920x1080. ``safe_area`` is (top, bottom, left, right) in reference pixels: the
+# bands the platform UI covers (mobile: Reels/TikTok status bar, caption + audio bar and action
+# buttons; youtube: just a title-safe margin). The frame is shrunk uniformly to fit inside what is
+# left, but only when the studio's "safe area" is switched on (``safe_default_on``).
+FORMATS = {
+    "mobile": {
+        "label": "Mobile 9:16",
+        "ref": (1080, 1920),
+        "subdir": "",
+        "safe_area": (130, 260, 50, 50),
+        "safe_limits": {"top": 500, "bottom": 500, "sides": 250},
+        "safe_default_on": True,
+        "encode_profile": None,
+        "caption_defaults": {},
+    },
+    "youtube": {
+        "label": "YouTube 16:9",
+        "ref": (1920, 1080),
+        "subdir": "youtube",
+        "safe_area": (54, 54, 96, 96),
+        "safe_limits": {"top": 300, "bottom": 300, "sides": 500},
+        "safe_default_on": False,
+        "encode_profile": "youtube",
+        # lower-third captions on the 1920x1080 canvas: wide box, text sized for 1080 px of height
+        "caption_defaults": {
+            "font_size": 56, "margin_v": 110, "box_width": 1240, "alignment": 2,
+            "pos_x": None, "pos_y": None, "outline": 3.0,
+        },
+    },
+}
+DEFAULT_FORMAT = "mobile"
+SAFE_AREA_DEFAULT = FORMATS["mobile"]["safe_area"]
+SAFE_AREA_REF = FORMATS["mobile"]["ref"]
+SAFE_AREA_LIMITS = FORMATS["mobile"]["safe_limits"]
+
+
+def get_format(name: str | None = None) -> dict:
+    """Format definition by id (``None`` -> mobile); ``ValueError`` for an unknown id."""
+    key = name or DEFAULT_FORMAT
+    if key not in FORMATS:
+        raise ValueError(f"unknown format {name!r} (use one of: {', '.join(FORMATS)})")
+    return {"id": key, **FORMATS[key]}
+
+
+def parse_safe_area(raw, fmt: str | None = None) -> tuple[int, int, int, int] | None:
+    """Turn a request value into ``(top, bottom, left, right)`` or ``None`` (= full frame).
+
+    ``false``/``null`` -> off, ``true`` -> the format's default, ``{"top", "bottom", "sides"}`` ->
+    custom margins (clamped; left and right are always equal so the picture stays centred under
+    the captions).
+    """
+    f = get_format(fmt)
+    if raw is None or raw is False:
+        return None
+    if raw is True:
+        return f["safe_area"]
+    if not isinstance(raw, dict):
+        raise ValueError("safe_area must be a boolean or an object with top/bottom/sides")
+    top, bottom, side, _ = f["safe_area"]
+    default = {"top": top, "bottom": bottom, "sides": side}
+    vals = {}
+    for key, limit in f["safe_limits"].items():
+        try:
+            v = float(raw.get(key, default[key]))
+        except (TypeError, ValueError):
+            raise ValueError(f"safe_area.{key} must be a number") from None
+        vals[key] = int(min(max(round(v), 0), limit))
+    return (vals["top"], vals["bottom"], vals["sides"], vals["sides"])
+
+
+def _safe_area_geometry(safe_area, ref=SAFE_AREA_REF):
+    """-> (top, left, box_w, box_h, scale) with box_* as fractions of the reference frame."""
+    top, bottom, left, right = (max(0, int(v)) for v in safe_area)
+    ref_w, ref_h = ref
+    box_w = (ref_w - left - right) / ref_w
+    box_h = (ref_h - top - bottom) / ref_h
+    if box_w <= 0.2 or box_h <= 0.2:
+        raise ValueError(f"safe area margins {safe_area} leave no room for the video")
+    return top, left, box_w, box_h, min(box_w, box_h)
+
+
+def _safe_area_origin(safe_area, ref=SAFE_AREA_REF) -> tuple[float, float, float]:
+    """Top-left corner of the shrunk picture and its scale, in reference-frame pixels."""
+    top, left, box_w, box_h, scale = _safe_area_geometry(safe_area, ref)
+    ref_w, ref_h = ref
+    x0 = left + (box_w * ref_w - scale * ref_w) / 2
+    y0 = top + (box_h * ref_h - scale * ref_h) / 2
+    return x0, y0, scale
+
+
+def safe_area_style(style: "CaptionStyle", safe_area, ref=SAFE_AREA_REF) -> "CaptionStyle":
+    """Move the captions so they stay on the same spot of the *picture* once the frame is shrunk
+    into the safe area (font size and box width are kept so the text stays readable)."""
+    if not safe_area:
+        return style
+    x0, y0, scale = _safe_area_origin(safe_area, ref)
+    ref_h = ref[1]
+
+    # alignment 1-3 anchor the text bottom at (height - margin_v), 7-9 the top at margin_v
+    if style.alignment in (7, 8, 9):
+        margin_v = round(y0 + style.margin_v * scale)
+    else:
+        margin_v = round(ref_h - (y0 + (ref_h - style.margin_v) * scale))
+    return replace(
+        style,
+        margin_v=margin_v,
+        pos_x=None if style.pos_x is None else round(x0 + style.pos_x * scale, 1),
+        pos_y=None if style.pos_y is None else round(y0 + style.pos_y * scale, 1),
+    )
+
+
+def safe_area_frame(frame, safe_area, ref=SAFE_AREA_REF):
+    """numpy twin of :func:`safe_area_filter`: shrink a BGR frame into the safe box over a blurred,
+    darkened copy of itself (used by the studio's frame / clip preview)."""
+    import cv2
+    import numpy as np
+
+    if not safe_area:
+        return frame
+    h, w = frame.shape[:2]
+    x0, y0, scale = _safe_area_origin(safe_area, ref)
+    fw = max(2, int(w * scale) // 2 * 2)
+    fh = max(2, int(h * scale) // 2 * 2)
+    small = cv2.resize(frame, (max(2, w // 8), max(2, h // 8)), interpolation=cv2.INTER_AREA)
+    bg = cv2.GaussianBlur(small, (0, 0), 6)
+    bg = cv2.resize(bg, (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+    gray = bg.mean(axis=2, keepdims=True)
+    bg = np.clip((gray + (bg - gray) * 0.85) - 0.22 * 255, 0, 255).astype(np.uint8)
+    fg = cv2.resize(frame, (fw, fh), interpolation=cv2.INTER_AREA)
+    x = int(x0 / ref[0] * w)
+    y = int(y0 / ref[1] * h)
+    ph, pw = min(fh, h - y), min(fw, w - x)
+    bg[y : y + ph, x : x + pw] = fg[:ph, :pw]
+    return bg
+
+
+YOUTUBE_COLOR_ARGS = ["-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709"]
+YOUTUBE_AUDIO_ARGS = ["-c:a", "aac", "-b:a", "320k", "-ar", "48000"]
+
+
+def video_encode_args(profile: str | None) -> list[str] | None:
+    """libx264 arguments for an output profile, or ``None`` for the caller's legacy settings.
+
+    ``youtube``: high quality master for upload (no bitrate cap, BT.709 tagged).
+    ``youtube_intermediate``: near-lossless scratch file that a later pass re-encodes.
+    """
+    if profile == "youtube":
+        return ["-c:v", "libx264", "-preset", "slow", "-crf", "18", "-pix_fmt", "yuv420p", *YOUTUBE_COLOR_ARGS]
+    if profile == "youtube_intermediate":
+        return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "12", "-pix_fmt", "yuv420p", *YOUTUBE_COLOR_ARGS]
+    return None
+
+
+def safe_area_filter(safe_area: tuple[int, int, int, int], ref=SAFE_AREA_REF) -> str:
+    """ffmpeg filtergraph that shrinks the whole frame into the safe box and fills the rest with a
+    blurred, darkened copy of the frame. Margins are relative to the format's reference frame
+    (``ref``), so any resolution of the same aspect works. Ends on the overlay output so ``,ass=...`` can follow."""
+    top, left, box_w, box_h, scale = _safe_area_geometry(safe_area, ref)
+    ref_w, ref_h = ref
+    x = f"main_w*{left / ref_w:.6f}+(main_w*{box_w:.6f}-overlay_w)/2"
+    y = f"main_h*{top / ref_h:.6f}+(main_h*{box_h:.6f}-overlay_h)/2"
+    return (
+        "split[bg][fg];"
+        "[bg]boxblur=40:3,eq=brightness=-0.22:saturation=0.85[b];"
+        f"[fg]scale=trunc(iw*{scale:.6f}/2)*2:trunc(ih*{scale:.6f}/2)*2[f];"
+        f"[b][f]overlay=x='{x}':y='{y}'"
+    )
+
+
 def render(
     video: Path,
     ass_file: Path,
@@ -692,25 +911,27 @@ def render(
     preview: tuple | None = None,
     on_progress=None,
     cancel_check=None,
+    safe_area: tuple[int, int, int, int] | None = None,
+    safe_area_ref=SAFE_AREA_REF,
+    encode_profile: str | None = None,
 ):
     # libass filter paths cannot contain unescaped spaces/colons, so stage a copy.
     temp_ass = Path(tempfile.mkdtemp(prefix="lyrics_sync_ass_")) / "lyrics.ass"
     shutil.copyfile(ass_file, temp_ass)
     ass_arg = f"ass={temp_ass}"
+    if safe_area:
+        # Shrink the frame first, then burn the captions at full size on top of it.
+        ass_arg = f"{safe_area_filter(safe_area, safe_area_ref)},{ass_arg}"
     cmd = [ffmpeg, "-hide_banner", "-y"]
     if preview:
         start, duration = preview
         cmd += ["-ss", str(start), "-t", str(duration), "-copyts", "-i", str(video)]
     else:
         cmd += ["-i", str(video)]
-    cmd += [
-        "-vf", ass_arg,
-        "-c:v", "libx264",
-        "-preset", "fast",
-        "-crf", "20",
-        "-c:a", "copy",
-        "-movflags", "+faststart",
+    video_args = video_encode_args(encode_profile) or [
+        "-c:v", "libx264", "-preset", "fast", "-crf", "20",
     ]
+    cmd += ["-vf", ass_arg, *video_args, "-c:a", "copy", "-movflags", "+faststart"]
     if on_progress:
         cmd += ["-progress", "pipe:1", "-nostats"]
     cmd.append(str(output))
@@ -759,6 +980,8 @@ def main():
     parser.add_argument("--language", default="es", help="lyric language (default: es)")
     parser.add_argument("--font", default="Helvetica", help="caption font (default: Helvetica)")
     parser.add_argument("--fontsize", type=int, default=48, help="caption font size (default: 48)")
+    parser.add_argument("--no-safe-area", action="store_true",
+                        help="keep the full frame (default shrinks it into the Reels/TikTok safe area)")
     parser.add_argument("--margin-v", type=int, default=760, help="bottom margin in pixels (default: 760)")
     parser.add_argument("--box-width", type=int, help="subtitle column box width in pixels (e.g. 700)")
     parser.add_argument("--no-lowercase", action="store_true", help="keep original lyric casing (default: lowercase)")
@@ -852,17 +1075,22 @@ def main():
         box_width=args.box_width,
         lowercase=not args.no_lowercase,
     )
+    safe_area = None if args.no_safe_area else SAFE_AREA_DEFAULT
     ass_text = build_ass(
         aligned,
         duration,
-        style=cli_style,
+        style=safe_area_style(cli_style, safe_area),
     )
     ass_file = output.with_suffix(".ass")
     ass_file.write_text(ass_text, encoding="utf-8")
     print(f"Wrote subtitles: {ass_file}")
 
     if not args.ass_only:
-        render(video, ass_file, output, find_ffmpeg(), preview=tuple(args.preview) if args.preview else None)
+        render(
+            video, ass_file, output, find_ffmpeg(),
+            preview=tuple(args.preview) if args.preview else None,
+            safe_area=safe_area,
+        )
 
 
 if __name__ == "__main__":

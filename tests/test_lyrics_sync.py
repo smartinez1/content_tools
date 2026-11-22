@@ -8,8 +8,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from lyrics_sync import (
-    CaptionStyle,
     NON_SOURCE_MARKERS,
+    CaptionStyle,
     build_ass,
     find_closest,
     hex_to_ass_color,
@@ -150,3 +150,72 @@ class TestBuildASS(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SafeAreaFilterTests(unittest.TestCase):
+    def test_default_fits_frame_inside_margins(self):
+        from lyrics_sync import safe_area_filter
+
+        f = safe_area_filter((200, 380, 100, 100))
+        # height is the limiting side: (1920-200-380)/1920 = 0.697917
+        self.assertIn("iw*0.697917", f)
+        self.assertTrue(f.startswith("split[bg][fg];"))
+        self.assertTrue(f.endswith("'"))  # last filter is the overlay so ',ass=' can follow
+
+    def test_rejects_margins_that_leave_no_room(self):
+        from lyrics_sync import safe_area_filter
+
+        with self.assertRaises(ValueError):
+            safe_area_filter((900, 900, 0, 0))
+
+
+class SafeAreaStyleTests(unittest.TestCase):
+    def test_caption_stays_on_same_spot_of_the_picture(self):
+        from lyrics_sync import CaptionStyle, safe_area_style
+
+        out = safe_area_style(CaptionStyle(margin_v=780, font_size=48, box_width=680), (200, 380, 100, 100))
+        # text bottom was y=1140 of 1920 -> 200 + 1140*0.697917 = 995.6 -> margin 924
+        self.assertEqual(out.margin_v, 924)
+        self.assertEqual((out.font_size, out.box_width), (48, 680))  # size untouched
+
+    def test_none_is_a_no_op(self):
+        from lyrics_sync import CaptionStyle, safe_area_style
+
+        st = CaptionStyle()
+        self.assertIs(safe_area_style(st, None), st)
+
+
+class SafeAreaParseTests(unittest.TestCase):
+    def test_parse(self):
+        from lyrics_sync import SAFE_AREA_DEFAULT, parse_safe_area
+
+        self.assertIsNone(parse_safe_area(False))
+        self.assertIsNone(parse_safe_area(None))
+        self.assertEqual(parse_safe_area(True), SAFE_AREA_DEFAULT)
+        self.assertEqual(parse_safe_area({"top": 100, "bottom": 200, "sides": 30}), (100, 200, 30, 30))
+        # missing keys fall back to the defaults, out-of-range values are clamped
+        self.assertEqual(parse_safe_area({"top": 9999, "sides": -5})[0:1], (500,))
+        self.assertEqual(parse_safe_area({"sides": -5})[2:], (0, 0))
+        with self.assertRaises(ValueError):
+            parse_safe_area({"top": "abc"})
+        with self.assertRaises(ValueError):
+            parse_safe_area("yes")
+
+    def test_frame_matches_the_filter_geometry(self):
+        import numpy as np
+
+        from lyrics_sync import safe_area_frame
+
+        frame = np.full((192, 108, 3), 255, np.uint8)
+        out = safe_area_frame(frame, (200, 400, 100, 100))  # margins are in 1080x1920 units; scale 0.6875
+        self.assertEqual(out.shape, frame.shape)
+        self.assertGreater(out[96, 54].mean(), 240)  # picture in the middle
+        self.assertLess(out[2, 54].mean(), 200)  # darkened fill above it
+        self.assertIs(safe_area_frame(frame, None), frame)
+
+    def test_style_maps_custom_position_too(self):
+        from lyrics_sync import CaptionStyle, safe_area_style
+
+        out = safe_area_style(CaptionStyle(pos_x=540, pos_y=960), (200, 380, 100, 100))
+        self.assertAlmostEqual(out.pos_x, 540, delta=1)  # centred picture, centred caption
+        self.assertAlmostEqual(out.pos_y, 200 + 960 * 0.697917, delta=1)

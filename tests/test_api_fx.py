@@ -210,6 +210,44 @@ class TestFxFrameEndpoint(unittest.TestCase):
         # same knobs twice -> identical frame (fixed seed), so slider comparisons are meaningful
         np.testing.assert_array_equal(on, self._frame({}))
 
+    def test_safe_area_shrinks_the_picture_into_the_margins(self):
+        res = self.client.post(
+            "/api/fx-frame",
+            json={
+                "song_name": "song", "time_sec": 1.0, "apply_fx": False,
+                "safe_area": {"top": 40, "bottom": 80, "sides": 20},
+            },
+        )
+        self.assertEqual(res.status_code, 200, res.text)
+        img = cv2.imdecode(np.frombuffer(res.content, np.uint8), cv2.IMREAD_COLOR)
+        self.assertEqual(img.shape, (240, 160, 3))
+        plain = self.client.post("/api/fx-frame", json={"song_name": "song", "time_sec": 1.0, "apply_fx": False})
+        plain = cv2.imdecode(np.frombuffer(plain.content, np.uint8), cv2.IMREAD_COLOR)
+        self.assertGreater(np.abs(img.astype(int) - plain.astype(int)).mean(), 5.0)
+        # no safe_area in the request means the full frame (the studio always sends its setting)
+        np.testing.assert_array_equal(
+            plain,
+            cv2.imdecode(
+                np.frombuffer(
+                    self.client.post(
+                        "/api/fx-frame",
+                        json={"song_name": "song", "time_sec": 1.0, "apply_fx": False, "safe_area": False},
+                    ).content,
+                    np.uint8,
+                ),
+                cv2.IMREAD_COLOR,
+            ),
+        )
+
+    def test_safe_area_validation_and_defaults_endpoint(self):
+        bad = self.client.post(
+            "/api/fx-frame", json={"song_name": "song", "time_sec": 1.0, "safe_area": {"top": "abc"}}
+        )
+        self.assertEqual(bad.status_code, 400)
+        d = self.client.get("/api/safe-area").json()
+        self.assertEqual(set(d["default"]), {"top", "bottom", "sides"})
+        self.assertEqual(set(d["limits"]), {"top", "bottom", "sides"})
+
     def test_errors(self):
         res = self.client.post("/api/fx-frame", json={"song_name": "nope", "time_sec": 0})
         self.assertEqual(res.status_code, 404)

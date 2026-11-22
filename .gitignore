@@ -50,3 +50,6 @@ htmlcov/
 *.m4v
 *.ass
 previews/
+
+# Playwright MCP scratch output
+.playwright-mcp/

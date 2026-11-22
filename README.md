@@ -26,6 +26,7 @@ Modern media toolkit for lyrics alignment, karaoke captions burn-in, typography 
   - `lyrics_sync.py`: Fast CLI for batch alignment, styling, and rendering.
   - `video_fx.py`: Audio-reactive video post-processing engine.
   - `mov_to_mp4.py`: High-quality MOV to MP4 (H.264/AAC) conversion.
+  - YouTube (16:9, up to 4K) masters are edited in the Studio's **YouTube 16:9** format: files live in `sm_content/youtube/`, lyric timings are shared with the mobile version (offset auto-detected), and renders use a high-quality YouTube encode profile.
   - `stitch_segments.py`: Joins shorter Oto export ranges into one video (video copied, sound rebuilt).
 
 ## Quickstart

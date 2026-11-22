@@ -29,21 +29,30 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from lyrics_sync import (
     AUDIO_DIR,
+    DEFAULT_FORMAT,
+    FORMATS,
     LYRICS_DIR,
     NON_SOURCE_MARKERS,
     PROJECT_ROOT,
+    SAFE_AREA_DEFAULT,
+    SAFE_AREA_LIMITS,
     VIDEO_DIR,
     CaptionStyle,
     align_lyrics,
     build_ass,
+    estimate_offset,
     find_closest,
     find_ffmpeg,
     get_duration,
+    get_format,
     has_audio,
     normalise_name,
     normalise_timings,
     parse_lyrics,
+    parse_safe_area,
     render,
+    safe_area_frame,
+    safe_area_style,
 )
 from snippets import (
     MAX_SNIPPET_SECONDS,
@@ -56,6 +65,8 @@ from snippets import (
 )
 from stitch_segments import (
     Cancelled as StitchCancelled,
+)
+from stitch_segments import (
     discover_groups,
     probe_video,
     stitch,
@@ -187,11 +198,39 @@ def range_streaming_response(request: Request, file_path: Path, media_type: str 
     return StreamingResponse(iterfile(), status_code=206, headers=headers)
 
 
-def _has_exact_media(name: str) -> bool:
+def _format_id(value) -> str:
+    """Validated format id from a request (``None`` -> mobile)."""
+    try:
+        return get_format(value)["id"]
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+def video_dir(fmt: str = DEFAULT_FORMAT) -> Path:
+    """Where a format's Compose / rendered videos live: sm_content/ (mobile), sm_content/youtube/."""
+    sub = FORMATS[fmt]["subdir"]
+    return VIDEO_DIR / sub if sub else VIDEO_DIR
+
+
+def _find_source(song_name: str, fmt: str = DEFAULT_FORMAT, suffixes=frozenset({".mp4", ".mov"})):
+    return find_closest(video_dir(fmt), song_name or "", set(suffixes), exclude=NON_SOURCE_MARKERS)
+
+
+def _find_source_any(song_name: str):
+    """A Compose video for the song in any format (lyric timings are shared between formats)."""
+    for fmt in FORMATS:
+        found = _find_source(song_name, fmt)
+        if found:
+            return found
+    return None
+
+
+def _has_exact_media(name: str, vdir: Path | None = None) -> bool:
     """True when ``name`` owns an audio or video file, i.e. it is not just a typo'd lyric file."""
+    vdir = vdir or VIDEO_DIR
     for suffix in (" - Compose", ""):
         for ext in (".mp4", ".mov", ".m4v"):
-            if (VIDEO_DIR / f"{name}{suffix}{ext}").is_file():
+            if (vdir / f"{name}{suffix}{ext}").is_file():
                 return True
     for ext in (".wav", ".mp3"):
         if (AUDIO_DIR / f"{name}{ext}").is_file():
@@ -211,13 +250,15 @@ def _typo_alias_of(name: str, media_names: list[str]) -> str | None:
 
 
 @app.get("/api/songs")
-def get_songs():
+def get_songs(format: str | None = None):
     """Scan the project directories and return discoverable songs and their asset states."""
+    fmt = _format_id(format)
+    vdir = video_dir(fmt)
     known = set()
     scan = (
         (LYRICS_DIR, {".txt"}),
         (AUDIO_DIR, {".wav", ".mp3"}),
-        (VIDEO_DIR, {".mp4", ".mov", ".m4v"}),
+        (vdir, {".mp4", ".mov", ".m4v"}),
     )
     for d, suffixes in scan:
         if d.is_dir():
@@ -228,27 +269,26 @@ def get_songs():
                     stem = p.stem.replace(" - Compose", "")
                     known.add(stem)
 
-    media_names = [name for name in known if _has_exact_media(name)]
+    media_names = [name for name in known if _has_exact_media(name, vdir)]
 
     songs = []
     for name in sorted(known):
         # A misspelled lyric file ("rudio blanco.txt") has no audio/video of its own; when it is
         # a close match for a media-backed song, drop it instead of listing a duplicate.
-        if not _has_exact_media(name) and _typo_alias_of(name, media_names):
+        if not _has_exact_media(name, vdir) and _typo_alias_of(name, media_names):
             continue
         lyrics = find_closest(LYRICS_DIR, name, {".txt"}) or find_closest(PROJECT_ROOT, name, {".txt"})
-        video = (
-            find_closest(VIDEO_DIR, name, {".mp4", ".mov", ".m4v"}, exclude=NON_SOURCE_MARKERS)
-            or find_closest(PROJECT_ROOT, name, {".mp4", ".mov", ".m4v"}, exclude=NON_SOURCE_MARKERS)
-        )
+        video = find_closest(vdir, name, {".mp4", ".mov", ".m4v"}, exclude=NON_SOURCE_MARKERS)
+        if not video and fmt == DEFAULT_FORMAT:
+            video = find_closest(PROJECT_ROOT, name, {".mp4", ".mov", ".m4v"}, exclude=NON_SOURCE_MARKERS)
         wav = find_closest(AUDIO_DIR, name, {".wav"})
         # Renders are always written as "<song> - lyrics.mp4"; do not fuzzy-match, or a
         # Compose video scores close enough and shows up as if it were the finished render.
-        rendered_path = VIDEO_DIR / f"{name} - lyrics.mp4"
+        rendered_path = vdir / f"{name} - lyrics.mp4"
         rendered = rendered_path if rendered_path.is_file() else None
         timings = None
         if video:
-            candidate = VIDEO_DIR / f"{name} - lyrics.json"
+            candidate = VIDEO_DIR / f"{name} - lyrics.json"  # shared by every format
             if candidate.exists():
                 timings = candidate
 
@@ -265,7 +305,28 @@ def get_songs():
             }
         )
 
-    return {"songs": songs}
+    return {"songs": songs, "format": fmt}
+
+
+@app.get("/api/formats")
+def get_formats():
+    """Output formats the studio can edit: reference canvas, safe-area defaults and limits."""
+    out = []
+    for key, f in FORMATS.items():
+        top, bottom, left, _ = f["safe_area"]
+        out.append({
+            "id": key,
+            "label": f["label"],
+            "ref_w": f["ref"][0],
+            "ref_h": f["ref"][1],
+            "subdir": f["subdir"],
+            "safe_area": {"top": top, "bottom": bottom, "sides": left},
+            "safe_limits": f["safe_limits"],
+            "safe_default_on": f["safe_default_on"],
+            "caption_defaults": f["caption_defaults"],
+            "encode_profile": f["encode_profile"],
+        })
+    return {"formats": out, "default": DEFAULT_FORMAT}
 
 
 @app.get("/api/fonts")
@@ -279,7 +340,7 @@ def get_timings(song_name: str):
     candidate = VIDEO_DIR / f"{song_name} - lyrics.json"
     if not candidate.exists():
         # Try finding via fuzzy lookup
-        video = find_closest(VIDEO_DIR, song_name, {".mp4", ".mov"}, exclude=NON_SOURCE_MARKERS)
+        video = _find_source_any(song_name)
         if video:
             c2 = VIDEO_DIR / f"{video.stem} - lyrics.json"
             if c2.exists():
@@ -311,7 +372,7 @@ def put_timings(song_name: str, payload: dict = Body(...)):
 
     # Only allow songs that exist (get_timings does the same fuzzy lookup), so a crafted
     # name can't create arbitrary files.
-    video = find_closest(VIDEO_DIR, song_name, {".mp4", ".mov"}, exclude=NON_SOURCE_MARKERS)
+    video = _find_source_any(song_name)
     if not video:
         raise HTTPException(status_code=404, detail="Source video not found")
     target = VIDEO_DIR / f"{song_name} - lyrics.json"
@@ -328,8 +389,8 @@ def put_timings(song_name: str, payload: dict = Body(...)):
 
 
 @app.get("/api/video/source/{song_name}")
-def stream_source_video(song_name: str, request: Request):
-    video = find_closest(VIDEO_DIR, song_name, {".mp4", ".mov", ".m4v"}, exclude=NON_SOURCE_MARKERS)
+def stream_source_video(song_name: str, request: Request, format: str | None = None):
+    video = _find_source(song_name, _format_id(format), {".mp4", ".mov", ".m4v"})
     if not video:
         raise HTTPException(status_code=404, detail="Source video not found")
     return range_streaming_response(request, video)
@@ -344,8 +405,8 @@ def stream_preview_video(preview_id: str, request: Request):
 
 
 @app.get("/api/video/rendered/{song_name}")
-def stream_rendered_video(song_name: str, request: Request):
-    clip = VIDEO_DIR / f"{song_name} - lyrics.mp4"
+def stream_rendered_video(song_name: str, request: Request, format: str | None = None):
+    clip = video_dir(_format_id(format)) / f"{song_name} - lyrics.mp4"
     if not clip.exists():
         raise HTTPException(status_code=404, detail="Rendered video not found")
     return range_streaming_response(request, clip)
@@ -364,7 +425,8 @@ _FX_FRAME_SLOTS = threading.BoundedSemaphore(2)
 def fx_frame(payload: dict = Body(...)):
     """Render one source frame with the Lo-Fi stack applied (JPEG) for fast knob tuning."""
     song_name = payload.get("song_name")
-    video = find_closest(VIDEO_DIR, song_name or "", {".mp4", ".mov"}, exclude=NON_SOURCE_MARKERS)
+    fmt = _format_id(payload.get("format"))
+    video = _find_source(song_name, fmt)
     if not video:
         raise HTTPException(status_code=404, detail="Source video not found")
     try:
@@ -372,11 +434,20 @@ def fx_frame(payload: dict = Body(...)):
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="time_sec must be a number")
     cfg = AestheticConfig.from_dict(payload.get("aesthetics") or {})
+    safe_area = _payload_safe_area({"safe_area": payload.get("safe_area", False)}, fmt)
+    ref = FORMATS[fmt]["ref"]
+    apply_fx = bool(payload.get("apply_fx", True))
     try:
         # Sync endpoints run on a big thread pool; cap concurrent renders so slider spam can't
         # spawn a pile of ffmpeg/librosa jobs.
         with _FX_FRAME_SLOTS:
-            frame = render_fx_frame(video, time_sec, cfg)
+            frame = render_fx_frame(
+                video,
+                time_sec,
+                cfg,
+                frame_transform=(lambda f: safe_area_frame(f, safe_area, ref)) if safe_area else None,
+                apply_fx=apply_fx,
+            )
     except RuntimeError as e:
         raise HTTPException(status_code=422, detail=str(e))
     ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 88])
@@ -389,11 +460,12 @@ def fx_frame(payload: dict = Body(...)):
 def fx_clip(payload: dict = Body(...)):
     """A short, low-resolution animation (WebP, or GIF as a fallback) of the Lo-Fi stack so audio-reactive effects are visible."""
     song_name = payload.get("song_name")
-    video = find_closest(VIDEO_DIR, song_name or "", {".mp4", ".mov"}, exclude=NON_SOURCE_MARKERS)
+    fmt = _format_id(payload.get("format"))
+    video = _find_source(song_name, fmt)
     if not video:
         raise HTTPException(
             status_code=404,
-            detail=f"No source video for '{song_name}'. Put '<song> - Compose.mp4' in {VIDEO_DIR}.",
+            detail=f"No source video for '{song_name}'. Put '<song> - Compose.mp4' in {video_dir(fmt)}.",
         )
     try:
         start = float(payload.get("time_sec", 0.0))
@@ -401,9 +473,19 @@ def fx_clip(payload: dict = Body(...)):
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="time_sec and duration must be numbers")
     cfg = AestheticConfig.from_dict(payload.get("aesthetics") or {})
+    safe_area = _payload_safe_area({"safe_area": payload.get("safe_area", False)}, fmt)
+    ref = FORMATS[fmt]["ref"]
+    apply_fx = bool(payload.get("apply_fx", True))
     try:
         with _FX_FRAME_SLOTS:
-            frames = render_fx_clip(video, start, min(max(duration, 0.2), 3.0), cfg)
+            frames = render_fx_clip(
+                video,
+                start,
+                min(max(duration, 0.2), 3.0),
+                cfg,
+                frame_transform=(lambda f: safe_area_frame(f, safe_area, ref)) if safe_area else None,
+                apply_fx=apply_fx,
+            )
     except RuntimeError as e:
         raise HTTPException(status_code=422, detail=str(e))
     from PIL import Image, features
@@ -438,10 +520,13 @@ def _normalise_preset(raw) -> dict:
         style.pop("time_offset", None)  # per-song timing, not part of a look
     else:
         style = None
-    return {
+    out = {
         "style": style,
         "aesthetics": AestheticConfig.from_dict(fx).to_dict() if isinstance(fx, dict) else None,
     }
+    if raw.get("format") in FORMATS:  # the format the caption layout was made for
+        out["format"] = raw["format"]
+    return out
 
 
 # Built-in FX looks (style left untouched). Values are overrides on top of AestheticConfig defaults.
@@ -617,6 +702,9 @@ def rename_preset(preset_name: str, data: dict = Body(...)):
 
 
 # Per-song settings that are not part of a look (currently the global subtitle offset).
+MAX_TIME_OFFSET = 5.0  # the studio's offset slider range
+
+
 def _song_settings_file() -> Path:
     return PRESETS_FILE.parent / "song_settings.json"
 
@@ -629,29 +717,72 @@ def _read_song_settings() -> dict:
         return {}
 
 
+def _offset_of(entry, fmt: str) -> float:
+    """Saved subtitle offset: mobile keeps the original top-level key, other formats their own."""
+    if not isinstance(entry, dict):
+        return 0.0
+    holder = entry if fmt == DEFAULT_FORMAT else (entry.get("formats") or {}).get(fmt)
+    value = holder.get("time_offset", 0.0) if isinstance(holder, dict) else 0.0
+    return value if isinstance(value, (int, float)) else 0.0
+
+
 @app.get("/api/song-settings/{song_name}")
-def get_song_settings(song_name: str):
-    entry = _read_song_settings().get(song_name)
-    offset = entry.get("time_offset", 0.0) if isinstance(entry, dict) else 0.0
-    return {"time_offset": offset if isinstance(offset, (int, float)) else 0.0}
+def get_song_settings(song_name: str, format: str | None = None):
+    fmt = _format_id(format)
+    return {"time_offset": _offset_of(_read_song_settings().get(song_name), fmt)}
 
 
 @app.put("/api/song-settings/{song_name}")
 def put_song_settings(song_name: str, data: dict = Body(...)):
+    fmt = _format_id(data.get("format"))
     try:
         offset = float(data.get("time_offset", 0.0))
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="time_offset must be a number")
     if not math.isfinite(offset):
         raise HTTPException(status_code=400, detail="time_offset must be a number")
-    offset = round(max(-5.0, min(5.0, offset)), 2)
+    offset = round(max(-MAX_TIME_OFFSET, min(MAX_TIME_OFFSET, offset)), 2)
     settings = _read_song_settings()
-    if offset:
-        settings[song_name] = {"time_offset": offset}
+    entry = settings.get(song_name) if isinstance(settings.get(song_name), dict) else {}
+    if fmt == DEFAULT_FORMAT:
+        entry.pop("time_offset", None)
+        if offset:
+            entry["time_offset"] = offset
+    else:
+        formats_map = dict(entry.get("formats") or {})
+        formats_map.pop(fmt, None)
+        if offset:
+            formats_map[fmt] = {"time_offset": offset}
+        entry.pop("formats", None)
+        if formats_map:
+            entry["formats"] = formats_map
+    if entry:
+        settings[song_name] = entry
     else:
         settings.pop(song_name, None)
     _write_json_atomic(_song_settings_file(), settings)
     return {"time_offset": offset}
+
+
+@app.post("/api/song-settings/{song_name}/detect-offset")
+def detect_offset(song_name: str, data: dict = Body(default={})):
+    """Measure how much later/earlier a format's video plays the song than the mobile video the
+    lyrics were aligned on. Nothing is saved; the studio applies the result to the offset slider."""
+    fmt = _format_id(data.get("format"))
+    if fmt == DEFAULT_FORMAT:
+        raise HTTPException(status_code=400, detail="Mobile is the reference; pick another format.")
+    reference = _find_source(song_name, DEFAULT_FORMAT)
+    other = _find_source(song_name, fmt)
+    if not reference:
+        raise HTTPException(status_code=404, detail=f"No mobile video for '{song_name}' to compare against.")
+    if not other:
+        raise HTTPException(status_code=404, detail=f"No {fmt} video for '{song_name}'.")
+    try:
+        result = estimate_offset(reference, other)
+    except RuntimeError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    result["reliable"] = result["confidence"] >= 0.15 and abs(result["offset"]) <= MAX_TIME_OFFSET
+    return {**result, "format": fmt, "reference": reference.name, "other": other.name}
 
 
 class Job:
@@ -703,14 +834,15 @@ def start_align(payload: dict = Body(...)):
         raise HTTPException(status_code=400, detail="song_name required")
 
     # Check everything up front so the user gets a precise message instead of a failed job.
-    video = find_closest(VIDEO_DIR, song_name, {".mp4", ".mov"}, exclude=NON_SOURCE_MARKERS)
+    fmt = _format_id(payload.get("format"))
+    video = _find_source(song_name, fmt)
     lyrics_path = find_closest(LYRICS_DIR, song_name, {".txt"}) or find_closest(PROJECT_ROOT, song_name, {".txt"})
     wav = find_closest(AUDIO_DIR, song_name, {".wav"})
     problems = []
     if not lyrics_path:
         problems.append(f"lyrics file not found (expected '{song_name}.txt' in {LYRICS_DIR})")
     if not video:
-        problems.append(f"source video not found (expected '{song_name} - Compose.mp4' in {VIDEO_DIR})")
+        problems.append(f"source video not found (expected '{song_name} - Compose.mp4' in {video_dir(fmt)})")
     if not video and not wav:
         problems.append(f"no audio to align either (expected '{song_name}.wav' in {AUDIO_DIR})")
     if problems:
@@ -771,16 +903,36 @@ def prune_previews(keep: int = MAX_PREVIEW_CLIPS) -> None:
         pass  # pruning is best-effort; never block a preview on it
 
 
+def _payload_safe_area(payload: dict, fmt: str = DEFAULT_FORMAT):
+    """`safe_area` in a request: false = full frame, true = the format's default margins, or custom
+    margins. Absent means "the format's habit" (mobile: on, youtube: off)."""
+    try:
+        return parse_safe_area(payload.get("safe_area", FORMATS[fmt]["safe_default_on"]), fmt)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/safe-area")
+def get_safe_area():
+    """Default margins and limits the studio's safe-area controls start from."""
+    top, bottom, sides, _ = SAFE_AREA_DEFAULT
+    return {"default": {"top": top, "bottom": bottom, "sides": sides}, "limits": SAFE_AREA_LIMITS}
+
+
 @app.post("/api/preview")
 def start_preview(payload: dict = Body(...)):
     song_name = payload.get("song_name")
     style_dict = payload.get("style", {})
     aesthetics_dict = payload.get("aesthetics", {})
     apply_lofi = payload.get("apply_lofi", True)
+    fmt = _format_id(payload.get("format"))
+    ref = FORMATS[fmt]["ref"]
+    profile = FORMATS[fmt]["encode_profile"]
+    safe_area = _payload_safe_area(payload, fmt)
     start_sec = float(payload.get("start_sec", 24.0))
     duration_sec = float(payload.get("duration_sec", 10.0))
 
-    video = find_closest(VIDEO_DIR, song_name, {".mp4", ".mov"}, exclude=NON_SOURCE_MARKERS)
+    video = _find_source(song_name, fmt)
     if not video:
         raise HTTPException(status_code=404, detail="Source video not found")
 
@@ -801,7 +953,10 @@ def start_preview(payload: dict = Body(...)):
             style = CaptionStyle.from_dict(style_dict)
             aligned = json.loads(timings_path.read_text(encoding="utf-8"))
             total_dur = get_duration(video)
-            ass_text = build_ass(aligned, total_dur, style=style)
+            ass_text = build_ass(
+                aligned, total_dur, width=ref[0], height=ref[1],
+                style=safe_area_style(style, safe_area, ref),
+            )
 
             temp_ass = PREVIEWS_DIR / f"{job.id}.ass"
             temp_ass.write_text(ass_text, encoding="utf-8")
@@ -830,6 +985,9 @@ def start_preview(payload: dict = Body(...)):
                 preview=(start_sec, duration_sec),
                 on_progress=on_progress,
                 cancel_check=lambda: job.cancel_requested,
+                safe_area=safe_area,
+                safe_area_ref=ref,
+                encode_profile="youtube_intermediate" if (apply_lofi and profile) else profile,
             )
 
             # Stage 2: Audio-reactive Lo-Fi pipeline if enabled
@@ -851,6 +1009,7 @@ def start_preview(payload: dict = Body(...)):
                     config=cfg,
                     on_progress=on_lofi_progress,
                     cancel_check=lambda: job.cancel_requested,
+                    encode_profile=profile,
                 )
 
             job.status = "completed"
@@ -878,8 +1037,13 @@ def start_render(payload: dict = Body(...)):
     style_dict = payload.get("style", {})
     aesthetics_dict = payload.get("aesthetics", {})
     lofi_mode = payload.get("lofi_mode", True)
+    fmt = _format_id(payload.get("format"))
+    ref = FORMATS[fmt]["ref"]
+    profile = FORMATS[fmt]["encode_profile"]
+    vdir = video_dir(fmt)
+    safe_area = _payload_safe_area(payload, fmt)
 
-    video = find_closest(VIDEO_DIR, song_name, {".mp4", ".mov"}, exclude=NON_SOURCE_MARKERS)
+    video = _find_source(song_name, fmt)
     if not video:
         raise HTTPException(status_code=404, detail="Source video not found")
 
@@ -896,16 +1060,19 @@ def start_render(payload: dict = Body(...)):
         job.message = "Preparing video export..."
         # Everything is written to scratch files first and only moved over the real output once
         # the whole job succeeded, so a cancelled/failed render can't clobber an earlier export.
-        final_out = VIDEO_DIR / f"{song_name} - lyrics.mp4"
-        scratch_clean = VIDEO_DIR / f"{song_name} - lyrics.clean.part.mp4"
-        scratch_out = VIDEO_DIR / f"{song_name} - lyrics.part.mp4"
+        final_out = vdir / f"{song_name} - lyrics.mp4"
+        scratch_clean = vdir / f"{song_name} - lyrics.clean.part.mp4"
+        scratch_out = vdir / f"{song_name} - lyrics.part.mp4"
         try:
             style = CaptionStyle.from_dict(style_dict)
             aligned = json.loads(timings_path.read_text(encoding="utf-8"))
             total_dur = get_duration(video)
-            ass_text = build_ass(aligned, total_dur, style=style)
+            ass_text = build_ass(
+                aligned, total_dur, width=ref[0], height=ref[1],
+                style=safe_area_style(style, safe_area, ref),
+            )
 
-            final_ass = VIDEO_DIR / f"{song_name} - lyrics.ass"
+            final_ass = vdir / f"{song_name} - lyrics.ass"
             final_ass.write_text(ass_text, encoding="utf-8")
 
             ffmpeg = find_ffmpeg()
@@ -925,6 +1092,9 @@ def start_render(payload: dict = Body(...)):
                 ffmpeg,
                 on_progress=on_progress,
                 cancel_check=lambda: job.cancel_requested,
+                safe_area=safe_area,
+                safe_area_ref=ref,
+                encode_profile="youtube_intermediate" if (lofi_mode and profile) else profile,
             )
 
             # Stage 2: Full Lo-Fi Audio-Reactive processing pass
@@ -944,6 +1114,7 @@ def start_render(payload: dict = Body(...)):
                     config=cfg,
                     on_progress=on_lofi_progress,
                     cancel_check=lambda: job.cancel_requested,
+                    encode_profile=profile,
                 )
 
             os.replace(scratch_out, final_out)
@@ -976,16 +1147,16 @@ if WEB_DIR.exists():
 SNIPPET_SUFFIX = " - lyrics.mp4"
 
 
-def _snippets_dir() -> Path:
-    return VIDEO_DIR / "snippets"
+def _snippets_dir(fmt: str = DEFAULT_FORMAT) -> Path:
+    return video_dir(fmt) / "snippets"
 
 
-def _snippet_source(song_name: str) -> Path | None:
+def _snippet_source(song_name: str, fmt: str = DEFAULT_FORMAT) -> Path | None:
     """The rendered video for ``song_name``: exact file name, no fuzzy matching (it is picked
     from the list /api/snippet-sources returned)."""
     if not song_name or "/" in song_name or "\\" in song_name:
         return None
-    path = VIDEO_DIR / f"{song_name}{SNIPPET_SUFFIX}"
+    path = video_dir(fmt) / f"{song_name}{SNIPPET_SUFFIX}"
     return path if path.is_file() else None
 
 
@@ -996,12 +1167,13 @@ def _fmt_stamp(t: float) -> str:
 def _snippet_request(payload: dict) -> tuple[Path, SnippetConfig, float]:
     """Validate a snippet request up front, so problems come back as a precise 4xx message."""
     song = payload.get("song_name") or ""
-    video = _snippet_source(song)
+    fmt = _format_id(payload.get("format"))
+    video = _snippet_source(song, fmt)
     if not video:
         raise HTTPException(
             status_code=404,
             detail=f"No rendered video for '{song}'. Render it first (expected '{song}{SNIPPET_SUFFIX}' "
-                   f"in {VIDEO_DIR}).",
+                   f"in {video_dir(fmt)}).",
         )
     cfg = SnippetConfig.from_dict(payload.get("config") or {})
     duration = get_duration(video)
@@ -1030,10 +1202,11 @@ def _logo() -> Path | None:
 
 
 @app.get("/api/snippet-sources")
-def snippet_sources():
+def snippet_sources(format: str | None = None):
+    vdir = video_dir(_format_id(format))
     songs = []
-    if VIDEO_DIR.is_dir():
-        for p in sorted(VIDEO_DIR.iterdir()):
+    if vdir.is_dir():
+        for p in sorted(vdir.iterdir()):
             if p.is_file() and p.name.endswith(SNIPPET_SUFFIX) and not p.name.startswith("."):
                 if ".part" in p.name:
                     continue
@@ -1047,8 +1220,8 @@ def snippet_sources():
 
 
 @app.get("/api/video/snippet-source/{song_name}")
-def stream_snippet_source(song_name: str, request: Request):
-    video = _snippet_source(song_name)
+def stream_snippet_source(song_name: str, request: Request, format: str | None = None):
+    video = _snippet_source(song_name, _format_id(format))
     if not video:
         raise HTTPException(status_code=404, detail="Rendered video not found")
     return range_streaming_response(request, video)
@@ -1073,7 +1246,8 @@ def snippet_frame(payload: dict = Body(...)):
     return Response(content=buf.tobytes(), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
-def _snippet_job(kind: str, song: str, video: Path, cfg: SnippetConfig, out: Path, **render_kw):
+def _snippet_job(kind: str, song: str, video: Path, cfg: SnippetConfig, out: Path,
+                 fmt: str = DEFAULT_FORMAT, **render_kw):
     job = Job(kind, song)
     with jobs_lock:
         jobs[job.id] = job
@@ -1095,7 +1269,7 @@ def _snippet_job(kind: str, song: str, video: Path, cfg: SnippetConfig, out: Pat
             job.progress = 100.0
             job.message = "Snippet ready." if kind == "snippet" else "Transition preview ready."
             job.output_url = (
-                f"/api/video/snippet/{quote(out.name)}" if kind == "snippet"
+                f"/api/video/snippet/{quote(out.name)}?format={fmt}" if kind == "snippet"
                 else f"/api/video/preview/{out.stem}"
             )
         except Exception as e:
@@ -1111,8 +1285,12 @@ def _snippet_job(kind: str, song: str, video: Path, cfg: SnippetConfig, out: Pat
 def start_snippet(payload: dict = Body(...)):
     video, cfg, _ = _snippet_request(payload)
     song = payload["song_name"]
-    out = _snippets_dir() / f"{song} - snippet {_fmt_stamp(cfg.start)}-{_fmt_stamp(cfg.end)}.mp4"
-    return _snippet_job("snippet", song, video, cfg, out)
+    fmt = _format_id(payload.get("format"))
+    out = _snippets_dir(fmt) / f"{song} - snippet {_fmt_stamp(cfg.start)}-{_fmt_stamp(cfg.end)}.mp4"
+    # 4K masters are cut at 1080p: the transitions are per-frame numpy work and a promo clip
+    # does not need more.
+    extra = {"max_width": 1920} if fmt != DEFAULT_FORMAT else {}
+    return _snippet_job("snippet", song, video, cfg, out, fmt=fmt, **extra)
 
 
 @app.post("/api/snippet-preview")
@@ -1132,23 +1310,24 @@ def start_snippet_preview(payload: dict = Body(...)):
 
 
 @app.get("/api/snippets")
-def list_snippets():
-    folder = _snippets_dir()
+def list_snippets(format: str | None = None):
+    fmt = _format_id(format)
+    folder = _snippets_dir(fmt)
     items = []
     if folder.is_dir():
         files = [p for p in folder.glob("*.mp4") if ".part" not in p.name]
         for p in sorted(files, key=lambda p: p.stat().st_mtime, reverse=True):
             items.append({
                 "name": p.name,
-                "url": f"/api/video/snippet/{quote(p.name)}",
+                "url": f"/api/video/snippet/{quote(p.name)}?format={fmt}",
                 "size_mb": round(p.stat().st_size / 1e6, 1),
             })
     return {"snippets": items}
 
 
 @app.get("/api/video/snippet/{name}")
-def stream_snippet(name: str, request: Request):
-    folder = _snippets_dir().resolve()
+def stream_snippet(name: str, request: Request, format: str | None = None):
+    folder = _snippets_dir(_format_id(format)).resolve()
     path = (folder / name).resolve()
     if path.parent != folder or path.suffix != ".mp4" or not path.is_file():
         raise HTTPException(status_code=404, detail="Snippet not found")
@@ -1217,6 +1396,11 @@ def stitch_sources(folder: str | None = None):
         seconds = sum(i["duration"] for i in infos)
         master = _stitch_master(name)
         output = base / "joined" / f"{name}.mp4"
+        compose_name = f"{name}.mp4" if name.endswith(" - Compose") else f"{name} - Compose.mp4"
+        compose = {
+            fmt: {"path": _rel(video_dir(fmt) / compose_name), "exists": (video_dir(fmt) / compose_name).is_file()}
+            for fmt in FORMATS
+        }
         groups.append({
             "name": name,
             "seconds": round(seconds, 2),
@@ -1226,12 +1410,19 @@ def stitch_sources(folder: str | None = None):
             "segments": [
                 {
                     "name": f.name,
+                    "path": _rel(f),
+                    "url": f"/api/video/stitch?path={quote(_rel(f))}",
                     "seconds": round(i["duration"], 2),
                     "frames": i["frames"],
+                    "width": i["width"],
+                    "height": i["height"],
+                    "fps": i["fps"],
                     "size_mb": round(f.stat().st_size / 1e6, 1),
                 }
                 for f, i in zip(files, infos)
             ],
+            # where the rest of the studio expects the joined video ("<song> - Compose.mp4"), per format
+            "compose": compose,
             "audio": (
                 {"path": _rel(master), "name": master.name, "seconds": round(get_duration(master), 2)}
                 if master else None
@@ -1314,16 +1505,21 @@ def start_stitch(payload: dict = Body(...)):
             job.progress = round(fraction * 100, 1)
             job.message = message
 
+        # Write next to the target and only move it into place on success, so a failed or
+        # cancelled join never leaves a half-written file or destroys an existing video.
+        scratch = output.with_name(f"{output.stem}.part.mp4")
         try:
             result = stitch(
                 files,
-                output,
+                scratch,
                 audio=audio_path,
                 audio_start=audio_start,
                 reencode=reencode,
                 on_progress=progress,
                 cancel_check=lambda: job.cancel_requested,
             )
+            os.replace(scratch, output)
+            result["output"] = str(output)
             job.status = "completed"
             job.progress = 100.0
             job.message = (
@@ -1335,9 +1531,11 @@ def start_stitch(payload: dict = Body(...)):
             job.output_url = f"/api/video/stitch?path={quote(_rel(output))}"
             job.result = result
         except StitchCancelled:
+            scratch.unlink(missing_ok=True)
             job.status = "cancelled"
             job.message = "Stopped."
         except Exception as e:
+            scratch.unlink(missing_ok=True)
             job.status = "failed"
             job.error = str(e)
             job.message = f"Error: {e}"

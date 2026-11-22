@@ -19,8 +19,10 @@
     <nav class="tab-bar" role="tablist">
       <button class="tab-btn active" data-tab="studio" role="tab">Studio</button>
       <button class="tab-btn" data-tab="snippets" role="tab">Snippets</button>
+      <button class="tab-btn" data-tab="stitch" role="tab">Stitch</button>
     </nav>
     <div class="song-bar" id="studioSongBar">
+      <div class="fmt-switch" id="formatSwitch" role="group" aria-label="Output format"></div>
       <label for="songSelect">Song:</label>
       <select id="songSelect">
         <option value="">Loading songs...</option>
@@ -37,6 +39,8 @@
         <video id="mainVideo" playsinline preload="auto"></video>
         <!-- Server-rendered frame / clip with the Lo-Fi effects applied, laid exactly over the video -->
         <img id="stageFx" class="stage-fx" alt="Frame with Lo-Fi effects applied" hidden>
+        <!-- Instagram Reels interface mock-up and safe-box guide, laid over the video box -->
+        <div id="reelsOverlay" class="reels-overlay" hidden></div>
         
         <!-- Interactive draggable subtitle overlay -->
         <div id="subOverlay" class="subtitle-overlay" title="Drag to adjust position">
@@ -195,6 +199,10 @@
           <button type="button" id="offsetPlus" class="btn-secondary">+0.1s</button>
           <button type="button" id="offsetReset" class="btn-secondary">Reset</button>
         </div>
+        <div class="offset-row" id="offsetDetectRow" hidden>
+          <button type="button" id="btnDetectOffset" class="btn-secondary" title="Compares this video's sound with the mobile video the lyrics were aligned on">&#127911; Detect from mobile video</button>
+        </div>
+        <p class="fine-print" id="offsetDetectStatus" hidden></p>
         <p class="fine-print">Moves every caption earlier (&minus;) or later (+) in the player and in previews/renders. The lyric line times above are not changed. Saved per song on the server.</p>
       </div>
 
@@ -246,6 +254,38 @@
           <label class="switch-label"><input type="checkbox" id="fxAutoRefresh" checked> Auto-refresh</label>
           <span id="fxFrameStatus" class="lines-meta"></span>
           <button id="btnFxResetAll" class="btn-secondary">Reset all</button>
+        </div>
+      </div>
+
+      <!-- Social safe area: shrinks the whole frame so Reels / TikTok UI doesn't cover it -->
+      <div class="panel-section" id="safeAreaSection">
+        <div class="section-title">
+          <span>Social Safe Area</span>
+          <label class="switch-label"><input type="checkbox" id="safeAreaToggle" checked> Active</label>
+        </div>
+        <p class="fx-note">The whole frame is shrunk to fit inside these margins (1080&times;1920 px) and the
+          captions follow it. The frame / FX clip preview above shows the result; use the Reels overlay to
+          check what the app covers.</p>
+        <div id="safeAreaControls">
+          <div class="control-group">
+            <label for="safeTop">Top margin (<span id="safeTopVal">130</span>px)</label>
+            <input type="range" id="safeTop" min="0" max="500" step="5" value="130">
+          </div>
+          <div class="control-group mt-sm">
+            <label for="safeBottom">Bottom margin (<span id="safeBottomVal">260</span>px)</label>
+            <input type="range" id="safeBottom" min="0" max="500" step="5" value="260">
+          </div>
+          <div class="control-group mt-sm">
+            <label for="safeSides">Side margins (<span id="safeSidesVal">50</span>px each)</label>
+            <input type="range" id="safeSides" min="0" max="250" step="5" value="50">
+          </div>
+          <div class="safe-readout" id="safeReadout"></div>
+        </div>
+        <div class="checkbox-row mt-sm">
+          <label id="overlayLabel" title="Draws the platform's player interface over the stage so you can see what it covers"><input type="checkbox" id="reelsToggle"> <span id="overlayLabelText">Instagram Reels overlay</span></label>
+          <label id="ytEndLabel" hidden title="Shows where YouTube end-screen elements (two videos and a subscribe button) can sit during the last 5-20 seconds"><input type="checkbox" id="ytEndToggle"> End-screen layout</label>
+          <label title="Dashed outline of the safe box"><input type="checkbox" id="safeGuidesToggle"> Show safe box</label>
+          <button id="btnSafeReset" class="btn-secondary" type="button">Reset</button>
         </div>
       </div>
 
@@ -374,6 +414,86 @@
     </aside>
   </main>
 
+  <!-- Stitch: join the ranges of a long Oto export into one video -->
+  <main class="studio-layout snippet-layout stitch-layout" id="stitchLayout" hidden>
+    <section class="stage-pane">
+      <div class="video-container snip-stage" id="stitchStage">
+        <video id="stitchVideo" controls playsinline preload="metadata"></video>
+      </div>
+      <div class="lines-meta" id="stitchNowPlaying">Pick a piece below (or the joined result) to play it.</div>
+
+      <div class="lines-card">
+        <div class="lines-card-header">
+          <h3>Pieces</h3>
+          <span class="lines-meta" id="stitchTotal"></span>
+        </div>
+        <div id="stitchSegments" class="stitch-segments"><div class="placeholder-msg">Loading...</div></div>
+        <div id="stitchWarnings" class="stitch-warnings"></div>
+      </div>
+    </section>
+
+    <aside class="control-panel">
+      <div class="panel-section">
+        <div class="section-title"><span>Exports</span></div>
+        <label class="fx-note" for="stitchFolder">Folder (inside the project)</label>
+        <div class="stitch-folder-row">
+          <input type="text" id="stitchFolder" class="text-input" placeholder="oto_generated_clips" spellcheck="false">
+          <button id="btnStitchRefresh" class="btn-secondary" type="button">Refresh</button>
+        </div>
+        <label class="fx-note" for="stitchGroup">Video (pieces are grouped by name)</label>
+        <select id="stitchGroup" class="full-select"><option value="">Loading...</option></select>
+        <p class="fx-note" id="stitchGroupNote"></p>
+        <details class="stitch-help">
+          <summary>How to name the exports</summary>
+          <p>In Oto: Export &rarr; Length &rarr; Custom (one range at a time, in order) and Fade &rarr; <b>No fade</b>.
+            Export every range under the <b>same name</b>, e.g. <code>espacio tiempo (2am) - Compose</code>.
+            Oto adds <code>_2</code>, <code>_3</code>&hellip; when the name is taken, and that suffix is what groups the pieces
+            and sets their order (<code>_2</code> before <code>_10</code>).</p>
+          <p>Ranges must be back to back (no gap, no overlap) and use the same size and frame rate.
+            Files named <code>&hellip; 1.mp4</code>, <code>&hellip; 2.mp4</code> (a space and a number, no underscore) are <i>not</i>
+            grouped automatically: rename them to the pattern above.</p>
+        </details>
+      </div>
+
+      <div class="panel-section">
+        <div class="section-title"><span>Sound</span></div>
+        <label class="switch-label"><input type="radio" name="stitchAudio" value="pieces" checked> Pieces' own sound (sample-accurate joins)</label>
+        <label class="switch-label"><input type="radio" name="stitchAudio" value="master"> Song master (use if the pieces were exported with a fade)</label>
+        <select id="stitchMaster" class="full-select" disabled><option value="">No masters in wav_files/</option></select>
+        <div class="fx-row">
+          <label for="stitchAudioStart">Picture starts at (s) in the master</label>
+          <input type="number" id="stitchAudioStart" class="text-input" value="0" min="0" step="0.01" disabled>
+        </div>
+        <label class="switch-label" title="Slower; use it when the pieces have different size, frame rate or codec settings">
+          <input type="checkbox" id="stitchReencode"> Re-encode (slow, tolerates mismatched pieces)</label>
+      </div>
+
+      <div class="panel-section">
+        <div class="section-title"><span>Output</span></div>
+        <label class="switch-label"><input type="radio" name="stitchOut" value="joined" checked> <span id="stitchOutJoined">joined/&lt;name&gt;.mp4</span></label>
+        <label class="switch-label"><input type="radio" name="stitchOut" value="mobile"> <span id="stitchOutMobile">sm_content/&lt;name&gt; - Compose.mp4 (Mobile)</span></label>
+        <label class="switch-label"><input type="radio" name="stitchOut" value="youtube"> <span id="stitchOutYoutube">sm_content/youtube/&lt;name&gt; - Compose.mp4 (YouTube)</span></label>
+        <p class="fx-note" id="stitchOutNote"></p>
+      </div>
+
+      <div class="panel-section action-section">
+        <div class="action-buttons-column">
+          <button id="btnStitch" class="btn-primary">&#128279; Join pieces</button>
+        </div>
+        <div id="stitchJobCard" class="job-card" style="display: none;">
+          <div class="job-card-header">
+            <span id="stitchJobTitle" class="job-title">Joining...</span>
+            <button id="btnStitchCancel" class="btn-tiny btn-danger">Cancel</button>
+          </div>
+          <div class="progress-bar-container">
+            <div id="stitchJobBar" class="progress-bar-fill" style="width: 0%;"></div>
+          </div>
+          <p id="stitchJobMessage" class="job-message"></p>
+        </div>
+      </div>
+    </aside>
+  </main>
+
   <!-- Rendered 10s preview: modal lightbox, outside the stage layout so it can't squeeze the video.
        The source video stays loaded behind it (currentTime stays song time). -->
   <div id="previewPanel" class="modal-backdrop" hidden>
@@ -389,5 +509,6 @@
 
   <script src="/static/app.js"></script>
   <script src="/static/snippets.js"></script>
+  <script src="/static/stitch.js"></script>
 </body>
 </html>
