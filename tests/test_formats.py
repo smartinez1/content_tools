@@ -156,7 +156,7 @@ class TestFormatApi(unittest.TestCase):
             "safe_area": {"top": 10, "bottom": 10, "sides": 40}})
         self.assertEqual(res.status_code, 200, res.text)
 
-    def _render(self, payload):
+    def _render(self, payload, song="song"):
         seen = {}
 
         def fake_render(video, ass_file, output, ffmpeg, **kw):
@@ -166,7 +166,7 @@ class TestFormatApi(unittest.TestCase):
             Path(output).write_bytes(b"x")
 
         with mock.patch.object(lyrics_sync_ui, "render", fake_render):
-            res = self.client.post("/api/render", json={"song_name": "song", "lofi_mode": False, **payload})
+            res = self.client.post("/api/render", json={"song_name": song, "lofi_mode": False, **payload})
             self.assertEqual(res.status_code, 200, res.text)
             job_id = res.json()["job_id"]
             for _ in range(100):
@@ -188,6 +188,23 @@ class TestFormatApi(unittest.TestCase):
         self.assertIn("PlayResY: 1080", yt["ass"])
         self.assertEqual(yt["video"].parent.name, "youtube")
         self.assertTrue((self.root / "sm_content" / "youtube" / "song - lyrics.mp4").is_file())
+
+    def test_first_render_creates_the_formats_output_folder(self):
+        fresh = self.root / "sm_content" / "fresh_yt"  # does not exist yet, like sm_content/youtube/ at first
+        shutil_rmtree = __import__("shutil").rmtree
+        self.addCleanup(shutil_rmtree, fresh, True)
+        (self.root / "sm_content" / "only joined - lyrics.json").write_text(
+            (self.root / "sm_content" / "song - lyrics.json").read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        self.addCleanup((self.root / "sm_content" / "only joined - lyrics.json").unlink, missing_ok=True)
+        real = lyrics_sync_ui.video_dir
+        with mock.patch.object(lyrics_sync_ui, "video_dir", lambda fmt="mobile": fresh if fmt == "youtube" else real(fmt)):
+            self.assertFalse(fresh.exists())
+            seen = self._render({"format": "youtube", "safe_area": False}, song="only joined")
+        self.assertIn("PlayResX: 1920", seen["ass"])
+        self.assertTrue((fresh / "only joined - lyrics.mp4").is_file())
+        self.assertTrue((fresh / "only joined - lyrics.ass").is_file())
+        self.assertEqual(seen["video"].parent.name, "joined")  # source came from the joined folder
 
     def test_safe_area_moves_the_captions_in_the_burned_ass(self):
         def margin_v(ass):

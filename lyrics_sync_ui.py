@@ -1086,6 +1086,7 @@ def start_render(payload: dict = Body(...)):
         scratch_clean = vdir / f"{song_name} - lyrics.clean.part.mp4"
         scratch_out = vdir / f"{song_name} - lyrics.part.mp4"
         try:
+            vdir.mkdir(parents=True, exist_ok=True)  # e.g. sm_content/youtube/ on the first YouTube render
             style = CaptionStyle.from_dict(style_dict)
             aligned = json.loads(timings_path.read_text(encoding="utf-8"))
             total_dur = get_duration(video)
