@@ -53,9 +53,14 @@ class TestFormatApi(unittest.TestCase):
         (cls.root / "sm_content" / "youtube").mkdir(parents=True)
         (cls.root / "lyrics").mkdir()
         (cls.root / "lyrics" / "song.txt").write_text("[Verse]\nhola\n", encoding="utf-8")
+        (cls.root / "oto_generated_clips" / "joined").mkdir(parents=True)
         for rel, size in (("sm_content/song - Compose.mp4", "108x192"),
                           ("sm_content/youtube/song - Compose.mp4", "192x108"),
-                          ("sm_content/youtube/only yt - Compose.mp4", "192x108")):
+                          ("sm_content/youtube/only yt - Compose.mp4", "192x108"),
+                          # the Stitch tab's joined folder: the YouTube format also looks here
+                          ("oto_generated_clips/joined/only joined - Compose.mp4", "192x108"),
+                          ("oto_generated_clips/joined/song - Compose.mp4", "320x180"),
+                          ("oto_generated_clips/joined/part only - Compose.part.mp4", "192x108")):
             subprocess.run(
                 [find_ffmpeg(), "-hide_banner", "-v", "error", "-y",
                  "-f", "lavfi", "-i", f"testsrc=size={size}:rate=15:duration=2",
@@ -104,6 +109,34 @@ class TestFormatApi(unittest.TestCase):
         self.assertIn("youtube", yt["song"]["video_path"])
         self.assertTrue(yt["song"]["has_timings"])  # lyric timings are shared between formats
         self.assertEqual(self.client.get("/api/songs?format=tiktok").status_code, 400)
+
+    def test_youtube_also_finds_the_joined_folder(self):
+        yt = {s["name"]: s for s in self.client.get("/api/songs?format=youtube").json()["songs"]}
+        mobile = {s["name"]: s for s in self.client.get("/api/songs").json()["songs"]}
+        self.assertIn("joined", yt["only joined"]["video_path"])
+        self.assertNotIn("only joined", mobile)  # mobile never looks there
+        # the format's own folder wins over joined/
+        self.assertIn("youtube", yt["song"]["video_path"])
+        self.assertNotIn("joined", yt["song"]["video_path"])
+        # a join that is still being written (.part.mp4) is not a source
+        self.assertNotIn("part only", yt)
+        self.assertEqual(self.client.get("/api/video/source/only joined?format=youtube").status_code, 200)
+        self.assertEqual(self.client.get("/api/video/source/only joined").status_code, 404)
+
+    def test_joined_video_works_in_the_editing_endpoints(self):
+        import cv2
+        import numpy as np
+
+        res = self.client.post("/api/fx-frame", json={
+            "song_name": "only joined", "time_sec": 1.0, "format": "youtube", "apply_fx": False})
+        self.assertEqual(res.status_code, 200, res.text)
+        img = cv2.imdecode(np.frombuffer(res.content, np.uint8), cv2.IMREAD_COLOR)
+        self.assertEqual(img.shape[:2], (108, 192))
+        res = self.client.post("/api/fx-frame", json={"song_name": "only joined", "time_sec": 1.0})
+        self.assertEqual(res.status_code, 404)  # mobile has no such video
+        res = self.client.post("/api/fx-clip", json={"song_name": "ghost", "format": "youtube"})
+        self.assertEqual(res.status_code, 404)
+        self.assertIn("joined", res.json()["detail"])  # tells where it looks
 
     def test_source_video_comes_from_the_formats_folder(self):
         self.assertEqual(self.client.get("/api/video/source/only yt").status_code, 404)

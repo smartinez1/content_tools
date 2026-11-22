@@ -747,6 +747,7 @@ FORMATS = {
         "safe_limits": {"top": 500, "bottom": 500, "sides": 250},
         "safe_default_on": True,
         "encode_profile": None,
+        "extra_source_dirs": [],
         "caption_defaults": {},
     },
     "youtube": {
@@ -757,6 +758,9 @@ FORMATS = {
         "safe_limits": {"top": 300, "bottom": 300, "sides": 500},
         "safe_default_on": False,
         "encode_profile": "youtube",
+        # Compose videos are also looked up here (project-relative): the Stitch tab's default
+        # output, so a fresh join shows up without copying it anywhere.
+        "extra_source_dirs": ["oto_generated_clips/joined"],
         # lower-third captions on the 1920x1080 canvas: wide box, text sized for 1080 px of height
         "caption_defaults": {
             "font_size": 56, "margin_v": 110, "box_width": 1240, "alignment": 2,

@@ -203,7 +203,7 @@
     els.groupNote.textContent = note;
 
     const sel = g ? g.output : "joined/<name>.mp4";
-    els.outJoined.textContent = sel;
+    els.outJoined.textContent = sel + " (the YouTube format finds it here)";
     els.outMobile.textContent = (g ? g.compose.mobile.path : "sm_content/<name> - Compose.mp4") + " (Mobile)";
     els.outYoutube.textContent = (g ? g.compose.youtube.path : "sm_content/youtube/<name> - Compose.mp4") + " (YouTube)";
     const bits = [];

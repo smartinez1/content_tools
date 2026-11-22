@@ -212,8 +212,24 @@ def video_dir(fmt: str = DEFAULT_FORMAT) -> Path:
     return VIDEO_DIR / sub if sub else VIDEO_DIR
 
 
+def source_dirs(fmt: str = DEFAULT_FORMAT) -> list[Path]:
+    """Folders searched for a format's Compose videos: its own folder first, then the extra ones
+    (YouTube: the Stitch tab's joined/ folder). Rendered output only ever goes to video_dir()."""
+    extra = [PROJECT_ROOT / rel for rel in FORMATS[fmt].get("extra_source_dirs", [])]
+    return [video_dir(fmt), *extra]
+
+
+def _source_where(fmt: str = DEFAULT_FORMAT) -> str:
+    """Human-readable folder list for error messages."""
+    return " or ".join(str(d) for d in source_dirs(fmt))
+
+
 def _find_source(song_name: str, fmt: str = DEFAULT_FORMAT, suffixes=frozenset({".mp4", ".mov"})):
-    return find_closest(video_dir(fmt), song_name or "", set(suffixes), exclude=NON_SOURCE_MARKERS)
+    for directory in source_dirs(fmt):
+        found = find_closest(directory, song_name or "", set(suffixes), exclude=NON_SOURCE_MARKERS)
+        if found:
+            return found
+    return None
 
 
 def _find_source_any(song_name: str):
@@ -225,13 +241,18 @@ def _find_source_any(song_name: str):
     return None
 
 
-def _has_exact_media(name: str, vdir: Path | None = None) -> bool:
-    """True when ``name`` owns an audio or video file, i.e. it is not just a typo'd lyric file."""
-    vdir = vdir or VIDEO_DIR
-    for suffix in (" - Compose", ""):
-        for ext in (".mp4", ".mov", ".m4v"):
-            if (vdir / f"{name}{suffix}{ext}").is_file():
-                return True
+def _has_exact_media(name: str, vdirs=None) -> bool:
+    """True when ``name`` owns an audio or video file, i.e. it is not just a typo'd lyric file.
+    ``vdirs`` is one folder or a list of folders to look for the video in."""
+    if vdirs is None:
+        vdirs = [VIDEO_DIR]
+    elif isinstance(vdirs, Path):
+        vdirs = [vdirs]
+    for vdir in vdirs:
+        for suffix in (" - Compose", ""):
+            for ext in (".mp4", ".mov", ".m4v"):
+                if (vdir / f"{name}{suffix}{ext}").is_file():
+                    return True
     for ext in (".wav", ".mp3"):
         if (AUDIO_DIR / f"{name}{ext}").is_file():
             return True
@@ -254,11 +275,12 @@ def get_songs(format: str | None = None):
     """Scan the project directories and return discoverable songs and their asset states."""
     fmt = _format_id(format)
     vdir = video_dir(fmt)
+    vdirs = source_dirs(fmt)
     known = set()
     scan = (
         (LYRICS_DIR, {".txt"}),
         (AUDIO_DIR, {".wav", ".mp3"}),
-        (vdir, {".mp4", ".mov", ".m4v"}),
+        *((d, {".mp4", ".mov", ".m4v"}) for d in vdirs),
     )
     for d, suffixes in scan:
         if d.is_dir():
@@ -269,16 +291,16 @@ def get_songs(format: str | None = None):
                     stem = p.stem.replace(" - Compose", "")
                     known.add(stem)
 
-    media_names = [name for name in known if _has_exact_media(name, vdir)]
+    media_names = [name for name in known if _has_exact_media(name, vdirs)]
 
     songs = []
     for name in sorted(known):
         # A misspelled lyric file ("rudio blanco.txt") has no audio/video of its own; when it is
         # a close match for a media-backed song, drop it instead of listing a duplicate.
-        if not _has_exact_media(name, vdir) and _typo_alias_of(name, media_names):
+        if not _has_exact_media(name, vdirs) and _typo_alias_of(name, media_names):
             continue
         lyrics = find_closest(LYRICS_DIR, name, {".txt"}) or find_closest(PROJECT_ROOT, name, {".txt"})
-        video = find_closest(vdir, name, {".mp4", ".mov", ".m4v"}, exclude=NON_SOURCE_MARKERS)
+        video = _find_source(name, fmt, {".mp4", ".mov", ".m4v"})
         if not video and fmt == DEFAULT_FORMAT:
             video = find_closest(PROJECT_ROOT, name, {".mp4", ".mov", ".m4v"}, exclude=NON_SOURCE_MARKERS)
         wav = find_closest(AUDIO_DIR, name, {".wav"})
@@ -465,7 +487,7 @@ def fx_clip(payload: dict = Body(...)):
     if not video:
         raise HTTPException(
             status_code=404,
-            detail=f"No source video for '{song_name}'. Put '<song> - Compose.mp4' in {video_dir(fmt)}.",
+            detail=f"No source video for '{song_name}'. Put '<song> - Compose.mp4' in {_source_where(fmt)}.",
         )
     try:
         start = float(payload.get("time_sec", 0.0))
@@ -842,7 +864,7 @@ def start_align(payload: dict = Body(...)):
     if not lyrics_path:
         problems.append(f"lyrics file not found (expected '{song_name}.txt' in {LYRICS_DIR})")
     if not video:
-        problems.append(f"source video not found (expected '{song_name} - Compose.mp4' in {video_dir(fmt)})")
+        problems.append(f"source video not found (expected '{song_name} - Compose.mp4' in {_source_where(fmt)})")
     if not video and not wav:
         problems.append(f"no audio to align either (expected '{song_name}.wav' in {AUDIO_DIR})")
     if problems:
