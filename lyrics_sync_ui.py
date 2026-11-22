@@ -54,6 +54,12 @@ from snippets import (
     render_snippet_frame,
     sync_to_beats,
 )
+from stitch_segments import (
+    Cancelled as StitchCancelled,
+    discover_groups,
+    probe_video,
+    stitch,
+)
 from video_fx import (
     AestheticConfig,
     aesthetic_schema,
@@ -658,6 +664,7 @@ class Job:
         self.message = "Initializing..."
         self.output_url = None
         self.error = None
+        self.result = None
         self.cancel_requested = False
 
 
@@ -676,6 +683,7 @@ def get_job(job_id: str):
             "message": j.message,
             "output_url": j.output_url,
             "error": j.error,
+            "result": j.result,
         }
 
 
@@ -1145,6 +1153,205 @@ def stream_snippet(name: str, request: Request):
     if path.parent != folder or path.suffix != ".mp4" or not path.is_file():
         raise HTTPException(status_code=404, detail="Snippet not found")
     return range_streaming_response(request, path)
+
+
+# ---------------- Stitch tab: join the ranges Oto can export ----------------
+
+STITCH_FOLDER = "oto_generated_clips"
+_PROBE_CACHE: dict[tuple, dict] = {}
+
+
+def _probe_cached(ffmpeg: str, path: Path) -> dict:
+    key = (str(path), path.stat().st_mtime_ns, path.stat().st_size)
+    if key not in _PROBE_CACHE:
+        if len(_PROBE_CACHE) > 400:
+            _PROBE_CACHE.clear()
+        _PROBE_CACHE[key] = probe_video(ffmpeg, path)
+    return _PROBE_CACHE[key]
+
+
+def _inside_project(value: str | None, default: Path) -> Path:
+    """Resolve a path the browser sent, refusing anything outside the project."""
+    root = PROJECT_ROOT.resolve()
+    if not value:
+        return default
+    candidate = Path(value).expanduser()
+    candidate = (candidate if candidate.is_absolute() else root / candidate).resolve()
+    if candidate != root and root not in candidate.parents:
+        raise HTTPException(status_code=400, detail="Path must be inside the project folder.")
+    return candidate
+
+
+def _rel(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(PROJECT_ROOT.resolve()))
+    except ValueError:
+        return str(path)
+
+
+def _stitch_master(group: str) -> Path | None:
+    """The song master for a group: 'song - Compose' also tries 'song'."""
+    names = [group]
+    parts = group.split(" - ")
+    names += [" - ".join(parts[:i]) for i in range(len(parts) - 1, 0, -1)]
+    for name in names:
+        wav = find_closest(AUDIO_DIR, name, {".wav"})
+        if wav:
+            return wav
+    return None
+
+
+@app.get("/api/stitch-sources")
+def stitch_sources(folder: str | None = None):
+    base = _inside_project(folder, (PROJECT_ROOT / STITCH_FOLDER).resolve())
+    if not base.is_dir():
+        raise HTTPException(status_code=404, detail=f"Folder not found: {_rel(base)}")
+    ffmpeg = find_ffmpeg()
+
+    groups = []
+    for name, files in discover_groups(base):
+        try:
+            infos = [_probe_cached(ffmpeg, f) for f in files]
+        except RuntimeError:
+            continue
+        seconds = sum(i["duration"] for i in infos)
+        master = _stitch_master(name)
+        output = base / "joined" / f"{name}.mp4"
+        groups.append({
+            "name": name,
+            "seconds": round(seconds, 2),
+            "width": infos[0]["width"],
+            "height": infos[0]["height"],
+            "fps": infos[0]["fps"],
+            "segments": [
+                {
+                    "name": f.name,
+                    "seconds": round(i["duration"], 2),
+                    "frames": i["frames"],
+                    "size_mb": round(f.stat().st_size / 1e6, 1),
+                }
+                for f, i in zip(files, infos)
+            ],
+            "audio": (
+                {"path": _rel(master), "name": master.name, "seconds": round(get_duration(master), 2)}
+                if master else None
+            ),
+            "output": _rel(output),
+            "output_url": (
+                f"/api/video/stitch?path={quote(_rel(output))}" if output.is_file() else None
+            ),
+            "output_size_mb": round(output.stat().st_size / 1e6, 1) if output.is_file() else None,
+        })
+
+    masters = []
+    if AUDIO_DIR.is_dir():
+        for wav in sorted(AUDIO_DIR.glob("*.wav")):
+            try:
+                masters.append({"path": _rel(wav), "name": wav.name, "seconds": round(get_duration(wav), 2)})
+            except RuntimeError:
+                continue
+
+    return {
+        "folder": _rel(base),
+        "groups": groups,
+        "masters": masters,
+        "defaults": {"audio_start": 0.0, "reencode": False},
+    }
+
+
+@app.post("/api/stitch")
+def start_stitch(payload: dict = Body(...)):
+    folder = _inside_project(payload.get("folder"), (PROJECT_ROOT / STITCH_FOLDER).resolve())
+    group = (payload.get("group") or "").strip()
+    if not group:
+        raise HTTPException(status_code=400, detail="group required")
+
+    found = dict(discover_groups(folder)).get(group)
+    if not found:
+        raise HTTPException(status_code=404, detail=f"No .mp4 pieces for {group!r} in {_rel(folder)}")
+
+    # The browser may send its own order (e.g. after reordering the list).
+    order = payload.get("files")
+    if order:
+        by_name = {p.name: p for p in found}
+        missing = [n for n in order if n not in by_name]
+        if missing:
+            raise HTTPException(status_code=400, detail="Unknown segment(s): " + ", ".join(missing))
+        files = [by_name[n] for n in order]
+    else:
+        files = found
+    if len(files) < 2:
+        raise HTTPException(status_code=400, detail="Need at least two segments to join.")
+
+    audio_path = None
+    if payload.get("audio"):
+        audio_path = _inside_project(payload["audio"], AUDIO_DIR)
+        if not audio_path.is_file():
+            raise HTTPException(status_code=404, detail=f"Audio not found: {_rel(audio_path)}")
+
+    try:
+        audio_start = float(payload.get("audio_start") or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="audio_start must be a number")
+    audio_start = max(0.0, audio_start)
+
+    output = _inside_project(payload.get("output"), folder / "joined" / f"{group}.mp4")
+    if output.suffix.lower() != ".mp4":
+        raise HTTPException(status_code=400, detail="Output must end in .mp4")
+    if output in [p.resolve() for p in files]:
+        raise HTTPException(status_code=400, detail="The output would overwrite one of the segments.")
+
+    reencode = bool(payload.get("reencode"))
+    job = Job("stitch", group)
+    with jobs_lock:
+        jobs[job.id] = job
+
+    def run():
+        job.status = "running"
+        job.message = "Starting..."
+
+        def progress(fraction, message):
+            job.progress = round(fraction * 100, 1)
+            job.message = message
+
+        try:
+            result = stitch(
+                files,
+                output,
+                audio=audio_path,
+                audio_start=audio_start,
+                reencode=reencode,
+                on_progress=progress,
+                cancel_check=lambda: job.cancel_requested,
+            )
+            job.status = "completed"
+            job.progress = 100.0
+            job.message = (
+                f"Done: {result['seconds']:.2f} s, {result['frames']} frames, "
+                f"{result['width']}x{result['height']} @ {result['fps']:g} fps."
+            )
+            if result["faded"]:
+                job.message += " Warning: some pieces end with Oto's fade-out."
+            job.output_url = f"/api/video/stitch?path={quote(_rel(output))}"
+            job.result = result
+        except StitchCancelled:
+            job.status = "cancelled"
+            job.message = "Stopped."
+        except Exception as e:
+            job.status = "failed"
+            job.error = str(e)
+            job.message = f"Error: {e}"
+
+    executor.submit(run)
+    return {"job_id": job.id, "output": _rel(output)}
+
+
+@app.get("/api/video/stitch")
+def stream_stitch(path: str, request: Request):
+    target = _inside_project(path, PROJECT_ROOT / "missing.mp4")
+    if target.suffix.lower() != ".mp4" or not target.is_file():
+        raise HTTPException(status_code=404, detail="Stitched video not found")
+    return range_streaming_response(request, target)
 
 
 @app.get("/")

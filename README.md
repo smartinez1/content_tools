@@ -26,6 +26,7 @@ Modern media toolkit for lyrics alignment, karaoke captions burn-in, typography 
   - `lyrics_sync.py`: Fast CLI for batch alignment, styling, and rendering.
   - `video_fx.py`: Audio-reactive video post-processing engine.
   - `mov_to_mp4.py`: High-quality MOV to MP4 (H.264/AAC) conversion.
+  - `stitch_segments.py`: Joins shorter Oto export ranges into one video (video copied, sound rebuilt).
 
 ## Quickstart
 
